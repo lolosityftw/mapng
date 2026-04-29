@@ -29,6 +29,7 @@ const els = {
   fSearch: document.getElementById("f-search"),
   buildMissing: document.getElementById("build-missing"),
   buildAll: document.getElementById("build-all"),
+  bakeVariants: document.getElementById("bake-variants"),
   terrainPack: document.getElementById("terrain-pack"),
   body: document.getElementById("entries-body"),
   batchStatus: document.getElementById("batch-status"),
@@ -45,6 +46,7 @@ const els = {
     status: document.getElementById("d-status"),
     generate: document.getElementById("d-generate"),
     regenerate: document.getElementById("d-regenerate"),
+    bake: document.getElementById("d-bake"),
     delete: document.getElementById("d-delete"),
   },
   preview3d: document.getElementById("preview3d"),
@@ -180,6 +182,7 @@ function selectEntry(slug) {
                             : "missing";
   els.d.generate.hidden = e.built || e._running;
   els.d.regenerate.hidden = !e.built;
+  els.d.bake.hidden = !e.built;
   els.d.delete.hidden = !e.built;
   loadPreview(e);
   loadStats(e);
@@ -526,12 +529,89 @@ async function downloadTerrainPack() {
 
 els.terrainPack.addEventListener("click", downloadTerrainPack);
 
+// ---- Pre-bake quality variants ---------------------------------------------
+async function bakeAllVariants() {
+  if (!confirm("Pre-bake every built entry at high/medium/low/minimum? Each variant takes a few seconds; expect a couple of minutes total.")) return;
+  els.bakeVariants.disabled = true;
+  els.batchStatus.hidden = false;
+  els.batchStatus.classList.remove("error");
+  els.batchStatus.textContent = "starting variant pre-bake…";
+  try {
+    const r = await fetch("/api/library/optimise/all", { method: "POST" });
+    const { job_id } = await r.json();
+    if (state.liveJob) state.liveJob.close();
+    const es = new EventSource(`/api/library/jobs/${job_id}/events`);
+    state.liveJob = es;
+    let done = 0, total = 0, failed = 0;
+    es.addEventListener("bake:start", (ev) => {
+      total = JSON.parse(ev.data).total;
+      els.batchStatus.textContent = `pre-baking 0 / ${total} variants…`;
+    });
+    es.addEventListener("variant:done", (ev) => {
+      const d = JSON.parse(ev.data); done++;
+      els.batchStatus.textContent = `pre-baking ${done} / ${total} · last: ${d.slug} @ ${d.quality}`;
+    });
+    es.addEventListener("variant:fail", (ev) => {
+      const d = JSON.parse(ev.data); failed++;
+      console.warn("variant fail", d);
+    });
+    es.addEventListener("bake:done", () => {
+      els.batchStatus.textContent = `pre-bake done — ${done} ok, ${failed} failed`;
+      els.bakeVariants.disabled = false;
+      es.close();
+      state.liveJob = null;
+      setTimeout(() => { els.batchStatus.hidden = true; }, 5000);
+      // Refresh the currently-selected entry's stats so new sizes show
+      if (state.selectedSlug) loadStats(state.entries.find(e => e.slug === state.selectedSlug));
+    });
+    es.addEventListener("bake:error", (ev) => {
+      const d = JSON.parse(ev.data);
+      els.batchStatus.classList.add("error");
+      els.batchStatus.textContent = `bake error: ${d.message}`;
+      els.bakeVariants.disabled = false;
+      es.close();
+    });
+  } catch (e) {
+    els.batchStatus.classList.add("error");
+    els.batchStatus.textContent = `bake failed: ${e}`;
+    els.bakeVariants.disabled = false;
+  }
+}
+els.bakeVariants.addEventListener("click", bakeAllVariants);
+
 els.d.generate.addEventListener("click", () => buildOne(state.selectedSlug, false));
 els.d.regenerate.addEventListener("click", () => {
   if (confirm(`Regenerate ${state.selectedSlug}? Existing cached mesh will be replaced.`)) {
     buildOne(state.selectedSlug, true);
   }
 });
+els.d.bake.addEventListener("click", async () => {
+  const slug = state.selectedSlug;
+  if (!slug) return;
+  els.d.bake.disabled = true;
+  els.d.bake.textContent = "baking…";
+  try {
+    const r = await fetch(`/api/library/optimise/${slug}`, { method: "POST" });
+    const { job_id } = await r.json();
+    const es = new EventSource(`/api/library/jobs/${job_id}/events`);
+    let done = 0, total = 0;
+    es.addEventListener("bake:start", (ev) => { total = JSON.parse(ev.data).total; });
+    es.addEventListener("variant:done", () => {
+      done++;
+      els.d.bake.textContent = `baking ${done}/${total}…`;
+    });
+    es.addEventListener("bake:done", () => {
+      els.d.bake.textContent = "Pre-bake variants";
+      els.d.bake.disabled = false;
+      es.close();
+      loadStats(state.entries.find((e) => e.slug === slug));   // refresh stats table
+    });
+  } catch (e) {
+    els.d.bake.textContent = "Pre-bake variants";
+    els.d.bake.disabled = false;
+  }
+});
+
 els.d.delete.addEventListener("click", async () => {
   if (!confirm(`Delete cached mesh for ${state.selectedSlug}?`)) return;
   await fetch(`/api/library/entries/${state.selectedSlug}`, { method: "DELETE" });

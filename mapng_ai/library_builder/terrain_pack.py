@@ -30,15 +30,15 @@ PBR_CACHE = config.CACHE_DIR / "pbr"
 # Mapping from our 8 land-cover classes to Poly Haven asset slugs.
 # Picked for visual fit at car-windshield distance + permissive licensing.
 # All Poly Haven assets are CC0.
-_CLASS_TO_SLUG: dict[str, str] = {
+_CLASS_TO_SLUG: dict[str, str | None] = {
     "asphalt":  "asphalt_02",
     "concrete": "concrete_layers_02",
     "lawn":     "aerial_grass_rock",          # short well-kept grass
     "pasture":  "aerial_grass_rock",          # NI pasture is similar in look
     "earth":    "mud_forest",
     "gravel":   "gravelly_sand",
-    "water":    "water_0011",                 # subtle ripple texture; BeamNG's water shader is the real renderer
-    "forest":   "forest_floor_01",
+    "water":    None,                         # no usable water texture on Poly Haven; procedural is fine
+    "forest":   "forest_floor",
 }
 
 
@@ -153,7 +153,13 @@ async def download_terrain_pack(*, emit=None) -> TerrainPackProgress:
 
     async with httpx.AsyncClient(timeout=120.0,
                                  headers={"User-Agent": "mapng-ai/0.1 (research)"}) as client:
-        async def _one(class_key: str, slug: str):
+        async def _one(class_key: str, slug: str | None):
+            if slug is None:
+                progress.completed += 1
+                progress.skipped += 1
+                if emit:
+                    await emit("class:skip", {"class": class_key, "slug": "(no PBR; procedural fallback)"})
+                return
             if has_real_pbr(class_key):
                 progress.completed += 1
                 progress.skipped += 1

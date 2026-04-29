@@ -216,12 +216,16 @@ generateBtn.addEventListener("click", async () => {
       }).catch((e) => console.error("[preview]", e));
     }
     if (data.key === "segment" && data.satellite_url) {
-      // Real Esri imagery is far better than the splat blend — use it
+      // Stage 1 of the terrain texture: bare satellite. The splat stage will
+      // upgrade this with per-class PBR detail if Poly Haven tiles are available.
       window.MapNGPreview?.setTerrainTexture?.(data.satellite_url, data.satellite_normal_url);
       window._satelliteUsed = true;
     }
-    if (data.key === "splat" && data.combined_url && !window._satelliteUsed) {
-      window.MapNGPreview?.setTerrainTexture?.(data.combined_url);
+    if (data.key === "splat") {
+      // Prefer the detailed composite (sat + PBR tiles + opacity) over the
+      // procedural class-color blend.
+      const url = data.detailed_url || data.combined_url;
+      if (url) window.MapNGPreview?.setTerrainTexture?.(url);
     }
     if (data.key === "place") {
       window._mapngLastPlace = data;        // remember for quality switches

@@ -43,11 +43,12 @@ class SplatLayer:
     coverage_pct: float = 0.0
 
 
-@dataclass(frozen=True)
+@dataclass
 class SplatResult:
     layers: list[SplatLayer]
-    combined_diffuse_path: Path  # blended preview texture
-    layer_index_map: np.ndarray  # uint8, terrain-space (row 0 = SOUTH per .ter convention)
+    combined_diffuse_path: Path        # blended preview texture (procedural, no satellite)
+    layer_index_map: np.ndarray        # uint8, terrain-space (row 0 = SOUTH per .ter convention)
+    detailed_diffuse_path: Path | None = None  # satellite + per-class PBR detail composite (preview)
 
 
 def _low_freq_noise(shape: tuple[int, int], scale: float, seed: int) -> np.ndarray:
@@ -55,6 +56,66 @@ def _low_freq_noise(shape: tuple[int, int], scale: float, seed: int) -> np.ndarr
     rng = np.random.default_rng(seed)
     base = rng.standard_normal(shape).astype(np.float32)
     return gaussian_filter(base, sigma=scale) * 6.0  # post-blur amplitude boost
+
+
+def build_detailed_terrain(
+    *,
+    layers: list[SplatLayer],
+    sat_rgb: np.ndarray,    # (size, size, 3) uint8 — Esri imagery
+    out_path: Path,
+    tile_count: int = 32,   # how many times each detail texture repeats across the terrain
+    detail_blend: float = 0.7,   # 0 = pure satellite, 1 = pure detail. 0.7 keeps colour from imagery
+) -> Path:
+    """Composite satellite + tiled per-class PBR diffuse, weighted by each
+    class's opacity mask. One PNG you can drop on the terrain mesh as a
+    single texture — no shader required.
+
+    Output is sized to the satellite (typically 2048²)."""
+    H, W = sat_rgb.shape[:2]
+    # Detail layer accumulator (RGB float32) and total opacity
+    detail = np.zeros((H, W, 3), dtype=np.float32)
+    total_op = np.zeros((H, W), dtype=np.float32)
+
+    # Per-tile size in the composite
+    tile_h = max(1, H // tile_count)
+    tile_w = max(1, W // tile_count)
+
+    for layer in layers:
+        if layer.source != "polyhaven":
+            continue            # procedural fallback skipped here
+        try:
+            with Image.open(layer.diffuse_path) as pil:
+                pil = pil.convert("RGB").resize((tile_w, tile_h), Image.LANCZOS)
+                tile = np.asarray(pil, dtype=np.float32)
+        except Exception:
+            continue
+        # Tile to full size by repetition
+        ny = (H + tile_h - 1) // tile_h
+        nx = (W + tile_w - 1) // tile_w
+        tiled = np.tile(tile, (ny, nx, 1))[:H, :W]
+        # Resize the opacity mask to the composite resolution
+        try:
+            with Image.open(layer.opacity_path) as op_pil:
+                op_pil = op_pil.convert("L").resize((W, H), Image.BILINEAR)
+                op = np.asarray(op_pil, dtype=np.float32) / 255.0
+        except Exception:
+            continue
+        detail += tiled * op[..., None]
+        total_op += op
+
+    # Where total_op > 0, normalise; elsewhere keep zero
+    safe = np.where(total_op > 1e-3, total_op, 1.0)
+    detail /= safe[..., None]
+
+    sat_f = sat_rgb.astype(np.float32)
+    # Mix proportional to the per-pixel total opacity — pure satellite where
+    # we have nothing, blended where opacity > 0
+    mix_w = np.clip(total_op, 0.0, 1.0) * detail_blend
+    out_rgb = sat_f * (1.0 - mix_w[..., None]) + detail * mix_w[..., None]
+    out_rgb = np.clip(out_rgb, 0, 255).astype(np.uint8)
+
+    Image.fromarray(out_rgb).save(out_path, optimize=True)
+    return out_path
 
 
 def build_splat(class_map: np.ndarray, out_dir: Path, *, seed: int = 1) -> SplatResult:

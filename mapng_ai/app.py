@@ -397,6 +397,103 @@ async def get_entry_stats(slug: str) -> dict:
     return {"slug": slug, "exists": True, "qualities": qualities}
 
 
+# ---- Pre-bake quality variants ----------------------------------------------
+@app.post("/api/library/optimise/all")
+async def post_optimise_all() -> dict:
+    """Pre-bake every catalogue entry at every quality preset, in parallel."""
+    from mapng_ai.library_builder import CATALOGUE
+    from mapng_ai.library_builder.optimise import QUALITY_PRESETS, optimise
+    from mapng_ai.library_builder.runner import target_glb
+
+    job_id = uuid.uuid4().hex[:12]
+    queue: asyncio.Queue[tuple[str, dict] | None] = asyncio.Queue()
+
+    class _LibJob:
+        def __init__(self):
+            self.queue = queue
+        async def emit(self, event, data):
+            await self.queue.put((event, data))
+        async def close(self):
+            await self.queue.put(None)
+
+    job = _LibJob()
+    _library_jobs[job_id] = job
+
+    qualities = ["high", "medium", "low", "minimum"]   # skip 'ultra' (no rewrite)
+
+    async def _bake_one(slug, q, src):
+        try:
+            await asyncio.to_thread(optimise, src, q)
+            await job.emit("variant:done", {"slug": slug, "quality": q})
+        except Exception as exc:
+            await job.emit("variant:fail", {"slug": slug, "quality": q, "msg": str(exc)})
+
+    async def _run():
+        try:
+            tasks = []
+            total = 0
+            for entry in CATALOGUE:
+                src = target_glb(entry)
+                if not src.exists():
+                    continue
+                for q in qualities:
+                    tasks.append(_bake_one(entry.slug, q, src))
+                    total += 1
+            await job.emit("bake:start", {"total": total, "qualities": qualities})
+            sem = asyncio.Semaphore(2)        # decimation is CPU-bound — keep it modest
+            async def _gated(t):
+                async with sem:
+                    await t
+            await asyncio.gather(*(_gated(t) for t in tasks), return_exceptions=True)
+            await job.emit("bake:done", {})
+        except Exception as exc:
+            await job.emit("bake:error", {"message": f"{type(exc).__name__}: {exc}"})
+        finally:
+            await job.close()
+
+    asyncio.create_task(_run())
+    return {"job_id": job_id}
+
+
+@app.post("/api/library/optimise/{slug}")
+async def post_optimise_one(slug: str) -> dict:
+    """Pre-bake one entry at all qualities."""
+    from mapng_ai.library_builder import CATALOGUE
+    from mapng_ai.library_builder.optimise import optimise
+    from mapng_ai.library_builder.runner import target_glb
+
+    entry = next((e for e in CATALOGUE if e.slug == slug), None)
+    if entry is None:
+        raise HTTPException(404, f"unknown slug: {slug}")
+    src = target_glb(entry)
+    if not src.exists():
+        raise HTTPException(400, f"{slug} not yet generated")
+
+    job_id = uuid.uuid4().hex[:12]
+    queue: asyncio.Queue = asyncio.Queue()
+    class _LJ:
+        def __init__(self): self.queue = queue
+        async def emit(self, e, d): await self.queue.put((e, d))
+        async def close(self): await self.queue.put(None)
+    job = _LJ()
+    _library_jobs[job_id] = job
+
+    async def _run():
+        qualities = ["high", "medium", "low", "minimum"]
+        await job.emit("bake:start", {"total": len(qualities), "qualities": qualities})
+        for q in qualities:
+            try:
+                await asyncio.to_thread(optimise, src, q)
+                await job.emit("variant:done", {"slug": slug, "quality": q})
+            except Exception as exc:
+                await job.emit("variant:fail", {"slug": slug, "quality": q, "msg": str(exc)})
+        await job.emit("bake:done", {})
+        await job.close()
+
+    asyncio.create_task(_run())
+    return {"job_id": job_id}
+
+
 # ---- Terrain PBR pack -------------------------------------------------------
 @app.get("/api/library/terrain-pack/status")
 async def get_terrain_pack_status() -> dict:

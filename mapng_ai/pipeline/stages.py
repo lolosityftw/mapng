@@ -22,7 +22,7 @@ from mapng_ai.pipeline.hsv_seg import classify_imagery, fuse_segmentation
 from mapng_ai.pipeline.imagery import ImageryResult, reproject_imagery
 from mapng_ai.pipeline.placement import BuildingPlacement, place_buildings
 from mapng_ai.pipeline.region import Region, resolve_region
-from mapng_ai.pipeline.splatting import SplatResult, build_splat
+from mapng_ai.pipeline.splatting import SplatResult, build_detailed_terrain, build_splat
 from mapng_ai.sources.base import BBoxLL, ElevationSource, ElevationTile
 from mapng_ai.sources.coverage import select_elevation_source
 from mapng_ai.sources.esri import ImageryTile, default_imagery_source
@@ -180,17 +180,38 @@ async def stage_splat(ctx: JobContext, emit: Emit) -> None:
     ctx.splat = await asyncio.to_thread(build_splat, ctx.class_map, ctx.out_dir)
     layers_payload = [
         {"key": l.cls.key, "label": l.cls.label, "color": list(l.cls.color_rgb),
-         "coverage_pct": round(l.coverage_pct, 1)}
+         "coverage_pct": round(l.coverage_pct, 1), "source": l.source}
         for l in ctx.splat.layers
     ]
     ctx.artifacts["terrain_combined"] = (
         f"/api/jobs/{ctx.job_id}/files/{ctx.splat.combined_diffuse_path.name}"
     )
+
+    # If real Esri imagery and PBR detail tiles are both available, bake a
+    # composite terrain texture for the preview pane.
+    detailed_url: str | None = None
+    has_polyhaven = any(l.source == "polyhaven" for l in ctx.splat.layers)
+    if ctx.imagery is not None and has_polyhaven:
+        detailed_path = ctx.out_dir / "terrain_detailed.png"
+        await asyncio.to_thread(
+            build_detailed_terrain,
+            layers=ctx.splat.layers,
+            sat_rgb=ctx.imagery.rgb,
+            out_path=detailed_path,
+        )
+        ctx.splat.detailed_diffuse_path = detailed_path
+        ctx.artifacts["terrain_detailed"] = (
+            f"/api/jobs/{ctx.job_id}/files/{detailed_path.name}"
+        )
+        detailed_url = ctx.artifacts["terrain_detailed"]
+
     await emit("stage:info", {
         "key": "splat",
         "layers": layers_payload,
         "n_layers": len(ctx.splat.layers),
         "combined_url": ctx.artifacts["terrain_combined"],
+        "detailed_url": detailed_url,
+        "has_pbr_detail": has_polyhaven,
     })
 
 
