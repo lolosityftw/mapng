@@ -18,6 +18,7 @@
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 const container = document.getElementById("preview");
 console.info("[preview] booting");
@@ -376,120 +377,228 @@ const _FLAT_ROOF_TYPES = new Set([
 ]);
 function _isFlatRoof(t) { return _FLAT_ROOF_TYPES.has(t); }
 
-function setBuildings(buildings) {
+// ---------------------------------------------------------------------------
+// GLB cache — loaded once per shape path, cloned per instance
+// ---------------------------------------------------------------------------
+const _gltfLoader = new GLTFLoader();
+const _glbCache = new Map();      // shape relpath → { scene, bbox } | Promise
+
+function _showLoadingBadge(text) {
+  let el = document.getElementById("preview-loading");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "preview-loading";
+    el.style.cssText = `
+      position:absolute; top:10px; left:50%; transform:translateX(-50%);
+      background:#14171c; border:1px solid #2a2f37; color:#adbac7;
+      padding:6px 14px; border-radius:999px; font-size:11px;
+      font-family:ui-monospace,Consolas,monospace; pointer-events:none; z-index:5;`;
+    container.appendChild(el);
+  }
+  el.textContent = text;
+  el.style.display = "block";
+}
+function _hideLoadingBadge() {
+  const el = document.getElementById("preview-loading");
+  if (el) el.style.display = "none";
+}
+
+async function _loadGlb(shapeRelpath) {
+  let cached = _glbCache.get(shapeRelpath);
+  if (cached) return cached;
+  const promise = new Promise((resolve, reject) => {
+    _gltfLoader.load(
+      `/api/asset?path=${encodeURIComponent(shapeRelpath)}`,
+      (gltf) => {
+        const scene = gltf.scene;
+        scene.traverse((o) => {
+          if (o.isMesh) {
+            o.castShadow = true;
+            o.receiveShadow = true;
+            // Force normalised UVs and standard material if missing
+            if (!o.material) o.material = new THREE.MeshStandardMaterial({ color: 0x999999 });
+          }
+        });
+        const bbox = new THREE.Box3().setFromObject(scene);
+        const size = new THREE.Vector3(); bbox.getSize(size);
+        if (size.x < 1e-3) size.x = 1;
+        if (size.y < 1e-3) size.y = 1;
+        if (size.z < 1e-3) size.z = 1;
+        resolve({ scene, bboxSize: size, bboxMin: bbox.min.clone() });
+      },
+      undefined,
+      (err) => reject(err),
+    );
+  });
+  _glbCache.set(shapeRelpath, promise);
+  try {
+    const result = await promise;
+    _glbCache.set(shapeRelpath, result);
+    return result;
+  } catch (e) {
+    _glbCache.delete(shapeRelpath);
+    throw e;
+  }
+}
+
+// Placeholder geometry used when a GLB is missing or fails to load
+function _placeholderInstance({ color, flat, sx, sy, sz, yaw, x, y, z }) {
+  const geo = _buildingGeometry({ flat });
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.85 });
+  const m = new THREE.Mesh(geo, mat);
+  m.scale.set(sx, sz, sy);
+  m.position.set(x, z, -y);
+  m.rotation.y = -yaw;
+  m.castShadow = true; m.receiveShadow = true;
+  return m;
+}
+
+async function setBuildings(buildings) {
   if (!state.scene) return;
   console.info("[preview] setBuildings:", buildings.length);
   if (state.buildingsGroup) {
     state.scene.remove(state.buildingsGroup);
     state.buildingsGroup.traverse((o) => {
-      if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); }
+      if (o.isMesh) { o.geometry?.dispose?.(); o.material?.dispose?.(); }
     });
   }
   const group = new THREE.Group();
-  const pitchedGeo = _buildingGeometry({ flat: false });
-  const flatGeo = _buildingGeometry({ flat: true });
-  // Bucket by (color, roofStyle)
-  const byBucket = new Map();
-  for (const b of buildings) {
-    const flat = _isFlatRoof(b.type);
-    const key = `${b.color}|${flat ? "f" : "p"}`;
-    if (!byBucket.has(key)) byBucket.set(key, { color: b.color, flat, list: [] });
-    byBucket.get(key).list.push(b);
-  }
-  const m = new THREE.Matrix4(); const q = new THREE.Quaternion();
-  for (const { color, flat, list } of byBucket.values()) {
-    const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.85 });
-    const inst = new THREE.InstancedMesh(flat ? flatGeo : pitchedGeo, mat, list.length);
-    inst.castShadow = inst.receiveShadow = true;
-    for (let i = 0; i < list.length; i++) {
-      const b = list[i];
-      const [sx, sy, sz] = b.scale;
-      q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -b.yaw);
-      m.compose(
-        new THREE.Vector3(b.x, b.z, -b.y),
-        q,
-        new THREE.Vector3(sx, sz, sy),     // BeamNG zsize → preview Y; ysize → preview Z
-      );
-      inst.setMatrixAt(i, m);
-    }
-    inst.instanceMatrix.needsUpdate = true;
-    group.add(inst);
-  }
   state.scene.add(group);
   state.buildingsGroup = group;
+
+  // Bucket by shape path (so each unique GLB loads once)
+  const byShape = new Map();
+  for (const b of buildings) {
+    const key = b.shape || "_placeholder";
+    if (!byShape.has(key)) byShape.set(key, []);
+    byShape.get(key).push(b);
+  }
+  const libShapes = [...byShape.keys()].filter(
+    (s) => s.startsWith("art/shapes/buildings_lib/") || s.startsWith("art/shapes/buildings_ai/"));
+  if (libShapes.length) _showLoadingBadge(`loading ${libShapes.length} building meshes…`);
+
+  const isLibrary = (p) => p && (p.startsWith("art/shapes/buildings_lib/") || p.startsWith("art/shapes/buildings_ai/"));
+  const placeholderForBucket = (instances) => {
+    for (const b of instances) {
+      const [sx, sy, sz] = b.scale;
+      group.add(_placeholderInstance({
+        color: b.color, flat: _isFlatRoof(b.type),
+        sx, sy, sz, yaw: b.yaw, x: b.x, y: b.y, z: b.z,
+      }));
+    }
+  };
+
+  // Kick all GLB loads in parallel
+  let loaded = 0;
+  await Promise.all([...byShape.entries()].map(async ([shape, instances]) => {
+    if (!isLibrary(shape)) {
+      placeholderForBucket(instances);
+      return;
+    }
+    let glb;
+    try {
+      glb = await _loadGlb(shape);
+    } catch (err) {
+      console.warn("[preview] GLB load failed, falling back:", shape, err);
+      placeholderForBucket(instances);
+      return;
+    }
+
+    // The GLB is its own size; we want each instance to be `scale` metres in
+    // BeamNG world units. Compute the per-axis factor.
+    const { bboxSize, bboxMin, scene } = glb;
+    for (const b of instances) {
+      const [sx, sy, sz] = b.scale;     // metres (BeamNG x/y/z)
+      const obj = scene.clone(true);
+      // BeamNG world: x east, y north, z up. Three.js: y up. Swap y↔z for axes,
+      // then divide each by the GLB's natural extent on that axis.
+      const fx = sx / bboxSize.x;
+      const fy = sz / bboxSize.y;     // GLB Y is up too (typical) → world Z
+      const fz = sy / bboxSize.z;
+      obj.scale.set(fx, fy, fz);
+
+      // Place: BeamNG's TSStatic convention is "position = base anchor"; we
+      // mirror that — lift by the GLB's vertical offset times the new factor.
+      obj.position.set(b.x, b.z - bboxMin.y * fy, -b.y);
+      obj.rotation.y = -b.yaw;
+      group.add(obj);
+    }
+    loaded++;
+    if (libShapes.length) _showLoadingBadge(`buildings: ${loaded}/${libShapes.length} meshes`);
+  }));
+  if (libShapes.length) _hideLoadingBadge();
 }
 
 // ---------------------------------------------------------------------------
-function setFoliage({ trees, hedges }) {
+async function setFoliage({ trees, hedges }) {
   if (!state.scene) return;
   console.info("[preview] setFoliage trees=%d hedges=%d", trees?.length ?? 0, hedges?.length ?? 0);
   if (state.foliageGroup) {
     state.scene.remove(state.foliageGroup);
     state.foliageGroup.traverse((o) => {
-      if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); }
+      if (o.isMesh) { o.geometry?.dispose?.(); o.material?.dispose?.(); }
     });
   }
   const group = new THREE.Group();
+  state.scene.add(group);
+  state.foliageGroup = group;
 
   if (trees?.length) {
-    // Per-instance canopy colour jitter: split into a handful of green tints
-    const greens = [0x2e7d32, 0x356b2c, 0x4a8a3a, 0x2a5e25, 0x568f3a];
-    const trunkGeo = new THREE.CylinderGeometry(0.06, 0.08, 0.35, 6);
-    trunkGeo.translate(0, 0.175, 0);
-    const canopyGeo = new THREE.ConeGeometry(0.42, 0.7, 8);
-    canopyGeo.translate(0, 0.35 + 0.7 / 2, 0);
-    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5d4037, roughness: 0.95 });
-
-    const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, trees.length);
-    trunks.castShadow = true;
-
-    // One InstancedMesh per canopy colour
-    const buckets = new Map();
-    for (let i = 0; i < trees.length; i++) {
-      const idx = i % greens.length;
-      if (!buckets.has(idx)) buckets.set(idx, []);
-      buckets.get(idx).push(i);
+    // Bucket trees by shape path so each tree GLB loads once
+    const byShape = new Map();
+    for (const t of trees) {
+      const key = t.shape || "_placeholder";
+      if (!byShape.has(key)) byShape.set(key, []);
+      byShape.get(key).push(t);
     }
+    const isLibrary = (p) => p && p.startsWith("art/shapes/trees_lib/");
 
-    const m = new THREE.Matrix4(); const q = new THREE.Quaternion();
-    for (let i = 0; i < trees.length; i++) {
-      const t = trees[i];
+    const placeholderTree = (t) => {
+      // Cone+cylinder fallback (the original built-in tree.dae shape)
+      const trunkGeo = new THREE.CylinderGeometry(0.06, 0.08, 0.35, 6);
+      trunkGeo.translate(0, 0.175, 0);
+      const canopyGeo = new THREE.ConeGeometry(0.42, 0.7, 8);
+      canopyGeo.translate(0, 0.35 + 0.7 / 2, 0);
+      const trunk = new THREE.Mesh(
+        trunkGeo, new THREE.MeshStandardMaterial({ color: 0x5d4037, roughness: 0.95 }));
+      const canopy = new THREE.Mesh(
+        canopyGeo, new THREE.MeshStandardMaterial({ color: 0x2e7d32, roughness: 0.85, flatShading: true }));
+      const wrap = new THREE.Group();
+      wrap.add(trunk); wrap.add(canopy);
       const [sx, sy, sz] = t.scale;
-      // Slight per-tree height jitter via the seeded yaw
-      const wobble = 0.85 + ((i * 9301 + 49297) % 233) / 1100;   // ≈ 0.85..1.07
-      q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -t.yaw);
-      m.compose(
-        new THREE.Vector3(t.x, t.z, -t.y),
-        q,
-        new THREE.Vector3(sx * wobble, sz * wobble, sy * wobble),
-      );
-      trunks.setMatrixAt(i, m);
-    }
-    trunks.instanceMatrix.needsUpdate = true;
-    group.add(trunks);
+      wrap.scale.set(sx, sz, sy);
+      wrap.position.set(t.x, t.z, -t.y);
+      wrap.rotation.y = -t.yaw;
+      wrap.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+      return wrap;
+    };
 
-    for (const [idx, indices] of buckets.entries()) {
-      const canopyMat = new THREE.MeshStandardMaterial({
-        color: greens[idx], roughness: 0.85, flatShading: true,
-      });
-      const inst = new THREE.InstancedMesh(canopyGeo, canopyMat, indices.length);
-      inst.castShadow = inst.receiveShadow = true;
-      for (let j = 0; j < indices.length; j++) {
-        const i = indices[j];
-        const t = trees[i];
-        const [sx, sy, sz] = t.scale;
-        const wobble = 0.85 + ((i * 9301 + 49297) % 233) / 1100;
-        q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -t.yaw);
-        m.compose(
-          new THREE.Vector3(t.x, t.z, -t.y),
-          q,
-          new THREE.Vector3(sx * wobble, sz * wobble, sy * wobble),
-        );
-        inst.setMatrixAt(j, m);
+    await Promise.all([...byShape.entries()].map(async ([shape, instances]) => {
+      if (!isLibrary(shape)) {
+        for (const t of instances) group.add(placeholderTree(t));
+        return;
       }
-      inst.instanceMatrix.needsUpdate = true;
-      group.add(inst);
-    }
+      let glb;
+      try {
+        glb = await _loadGlb(shape);
+      } catch (err) {
+        console.warn("[preview] tree GLB load failed:", shape, err);
+        for (const t of instances) group.add(placeholderTree(t));
+        return;
+      }
+      const { bboxSize, bboxMin, scene } = glb;
+      for (const t of instances) {
+        const [sx, sy, sz] = t.scale;
+        const obj = scene.clone(true);
+        const fx = sx / bboxSize.x;
+        const fy = sz / bboxSize.y;
+        const fz = sy / bboxSize.z;
+        obj.scale.set(fx, fy, fz);
+        obj.position.set(t.x, t.z - bboxMin.y * fy, -t.y);
+        obj.rotation.y = -t.yaw;
+        group.add(obj);
+      }
+    }));
   }
 
   if (hedges?.length) {
@@ -511,9 +620,6 @@ function setFoliage({ trees, hedges }) {
     inst.instanceMatrix.needsUpdate = true;
     group.add(inst);
   }
-
-  state.scene.add(group);
-  state.foliageGroup = group;
 }
 
 // ---------------------------------------------------------------------------

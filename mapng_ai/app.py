@@ -6,6 +6,7 @@ import json
 import os
 import time
 import uuid
+from pathlib import Path
 from typing import AsyncIterator
 
 import uvicorn
@@ -330,6 +331,44 @@ async def get_entry_glb(slug: str) -> FileResponse:
     return FileResponse(
         glb,
         media_type="model/gltf-binary",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+# ---- Library asset serving (used by /preview) -------------------------------
+@app.get("/api/asset")
+async def get_asset_by_relpath(path: str) -> FileResponse:
+    """Serve a GLB/DAE/PNG from `assets/` by its in-zip relative path.
+
+    Translates `art/shapes/buildings_lib/<type>/<file>` and
+    `art/shapes/trees_lib/<type>/<file>` back to the on-disk location under
+    `assets/buildings/` or `assets/trees/`.
+    """
+    if ".." in path or path.startswith(("/", "\\")):
+        raise HTTPException(400, "Invalid path")
+
+    fs: Path | None = None
+    if path.startswith("art/shapes/buildings_lib/"):
+        tail = path[len("art/shapes/buildings_lib/"):]
+        fs = config.ROOT / "assets" / "buildings" / tail
+    elif path.startswith("art/shapes/trees_lib/"):
+        tail = path[len("art/shapes/trees_lib/"):]
+        fs = config.ROOT / "assets" / "trees" / tail
+    elif path.startswith("art/shapes/vehicles_lib/"):
+        tail = path[len("art/shapes/vehicles_lib/"):]
+        fs = config.ROOT / "assets" / "vehicles" / tail
+    else:
+        raise HTTPException(404, f"Path not in a known asset namespace: {path}")
+
+    fs = fs.resolve()
+    root = (config.ROOT / "assets").resolve()
+    if not str(fs).startswith(str(root)) or not fs.exists():
+        raise HTTPException(404, f"Asset not found: {path}")
+
+    media = {".glb": "model/gltf-binary", ".gltf": "model/gltf+json", ".dae": "model/vnd.collada+xml"}
+    return FileResponse(
+        fs,
+        media_type=media.get(fs.suffix.lower(), "application/octet-stream"),
         headers={"Cache-Control": "public, max-age=3600"},
     )
 

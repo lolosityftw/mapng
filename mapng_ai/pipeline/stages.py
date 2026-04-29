@@ -213,11 +213,13 @@ async def stage_place(ctx: JobContext, emit: Emit) -> None:
             "scale": list(p.scale_xyz),
             "color": p.asset.color_hex,
             "type": p.asset.type_label,
+            "shape": p.asset.shape_relpath,
         }
         for p in ctx.buildings
     ]
     trees_payload = [
-        {"x": t.x, "y": t.y, "z": t.z, "yaw": t.yaw, "scale": list(t.scale_xyz)}
+        {"x": t.x, "y": t.y, "z": t.z, "yaw": t.yaw,
+         "scale": list(t.scale_xyz), "shape": t.shape_relpath}
         for t in ctx.foliage.trees
     ]
     hedges_payload = [
