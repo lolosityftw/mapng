@@ -1,0 +1,167 @@
+/* MapNG-AI — Phase 0 frontend
+   Map picker (Leaflet) + progress feed (SSE).
+   3D preview lives in preview.js as an ES module. */
+
+const COOKSTOWN = [54.6479, -6.7456]; // default centre
+
+const map = L.map("map", { zoomControl: true }).setView(COOKSTOWN, 13);
+
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  attribution: "© OpenStreetMap contributors",
+  maxZoom: 19,
+}).addTo(map);
+
+// Drawing
+const drawnItems = new L.FeatureGroup().addTo(map);
+const drawControl = new L.Control.Draw({
+  edit: { featureGroup: drawnItems, edit: false, remove: true },
+  draw: {
+    polygon: false, polyline: false, marker: false,
+    circle: false, circlemarker: false,
+    rectangle: { shapeOptions: { color: "#d29922", weight: 2 } },
+  },
+});
+map.addControl(drawControl);
+
+let currentBBox = null;
+const bboxReadout = document.getElementById("bbox-readout");
+const generateBtn = document.getElementById("generate");
+const statusEl = document.getElementById("status");
+const stagesEl = document.getElementById("stages");
+
+function setBBox(rect) {
+  drawnItems.clearLayers();
+  drawnItems.addLayer(rect);
+  const b = rect.getBounds();
+  currentBBox = {
+    west:  b.getWest(),
+    south: b.getSouth(),
+    east:  b.getEast(),
+    north: b.getNorth(),
+  };
+  const widthKm  = haversineKm(b.getSouth(), b.getWest(), b.getSouth(), b.getEast());
+  const heightKm = haversineKm(b.getSouth(), b.getWest(), b.getNorth(), b.getWest());
+  bboxReadout.textContent =
+    `${widthKm.toFixed(2)} × ${heightKm.toFixed(2)} km · ` +
+    `W ${currentBBox.west.toFixed(5)}, S ${currentBBox.south.toFixed(5)}, ` +
+    `E ${currentBBox.east.toFixed(5)}, N ${currentBBox.north.toFixed(5)}`;
+  generateBtn.disabled = false;
+}
+
+map.on(L.Draw.Event.CREATED, (e) => setBBox(e.layer));
+map.on("draw:deleted", () => {
+  currentBBox = null;
+  bboxReadout.textContent = "draw a rectangle on the map";
+  generateBtn.disabled = true;
+});
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const toRad = (d) => (d * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 +
+            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+// ---- Stage rendering ----
+function renderStages(stageKeys) {
+  const labels = {
+    region:    "Resolve region",
+    fetch:     "Fetch DEM / imagery / OSM",
+    heightmap: "Build heightmap",
+    segment:   "Land-cover segmentation",
+    splat:     "Material splatting",
+    place:     "Object placement",
+    export:    "BeamNG export",
+  };
+  stagesEl.innerHTML = "";
+  stageKeys.forEach((key, i) => {
+    const li = document.createElement("li");
+    li.id = `stage-${key}`;
+    li.innerHTML = `
+      <span class="icon">${(i + 1).toString().padStart(2, "0")}</span>
+      <span class="label">${labels[key] || key}</span>
+      <span class="state">·</span>
+      <div class="bar"><div></div></div>`;
+    stagesEl.appendChild(li);
+  });
+}
+
+function setStageState(key, state) {
+  const li = document.getElementById(`stage-${key}`);
+  if (!li) return;
+  li.classList.remove("running", "done", "error");
+  li.classList.add(state);
+  const stateEl = li.querySelector(".state");
+  if (stateEl) stateEl.textContent =
+    state === "running" ? "…" :
+    state === "done"    ? "✓" :
+    state === "error"   ? "✗" : "·";
+}
+
+function setStageProgress(key, fraction) {
+  const li = document.getElementById(`stage-${key}`);
+  if (!li) return;
+  const bar = li.querySelector(".bar > div");
+  if (bar) bar.style.width = `${(fraction * 100).toFixed(0)}%`;
+}
+
+// ---- Generate flow ----
+generateBtn.addEventListener("click", async () => {
+  if (!currentBBox) return;
+  generateBtn.disabled = true;
+  statusEl.className = "status running";
+  statusEl.textContent = "starting…";
+  stagesEl.innerHTML = "";
+
+  const res = await fetch("/api/generate", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(currentBBox),
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    statusEl.className = "status error";
+    statusEl.textContent = `error: ${err}`;
+    generateBtn.disabled = false;
+    return;
+  }
+  const { job_id } = await res.json();
+  statusEl.textContent = `running (${job_id})`;
+
+  const es = new EventSource(`/api/jobs/${job_id}/events`);
+
+  es.addEventListener("pipeline:start", (ev) => {
+    const data = JSON.parse(ev.data);
+    renderStages(data.stages);
+  });
+  es.addEventListener("stage:start", (ev) => {
+    const { key } = JSON.parse(ev.data);
+    setStageState(key, "running");
+  });
+  es.addEventListener("stage:progress", (ev) => {
+    const { key, fraction } = JSON.parse(ev.data);
+    setStageProgress(key, fraction);
+  });
+  es.addEventListener("stage:done", (ev) => {
+    const { key } = JSON.parse(ev.data);
+    setStageState(key, "done");
+    setStageProgress(key, 1);
+  });
+  es.addEventListener("pipeline:done", () => {
+    statusEl.className = "status done";
+    statusEl.textContent = "done";
+    generateBtn.disabled = false;
+    es.close();
+  });
+  es.addEventListener("pipeline:error", (ev) => {
+    const { message } = JSON.parse(ev.data);
+    statusEl.className = "status error";
+    statusEl.textContent = `error: ${message}`;
+    generateBtn.disabled = false;
+    es.close();
+  });
+  es.onerror = () => { /* SSE auto-closes when server ends stream; ignore */ };
+});

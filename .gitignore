@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# uv
+.uv/
+
+# Project
+mapng_ai/cache/
+mapng_ai/ai/models/
+/output/
+/assets/
+*.ter
+*.zip
+.env
+.env.local
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Reference repo (sibling — not part of this project)
+../mapng-reference/
