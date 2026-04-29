@@ -189,12 +189,14 @@ function reset() {
     state.terrainMesh.material.dispose();
     state.terrainMesh = null;
   }
-  if (state.buildingsGroup) {
-    state.scene.remove(state.buildingsGroup);
-    state.buildingsGroup.traverse((o) => {
-      if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); }
-    });
-    state.buildingsGroup = null;
+  for (const key of ["buildingsGroup", "foliageGroup", "roadsGroup"]) {
+    if (state[key]) {
+      state.scene.remove(state[key]);
+      state[key].traverse((o) => {
+        if (o.isMesh || o.isLine) { o.geometry?.dispose?.(); o.material?.dispose?.(); }
+      });
+      state[key] = null;
+    }
   }
   if (state.referenceGrid) {
     state.referenceGrid.visible = true;
@@ -293,6 +295,31 @@ function setTerrainTexture(url) {
   }, undefined, (err) => console.error("[preview] texture load failed", err));
 }
 
+// ---- Pitched-roof unit geometry shared by every building instance ----
+function _pitchedBoxGeometry() {
+  const verts = new Float32Array([
+    -0.5, 0.0, -0.5,   0.5, 0.0, -0.5,   0.5, 0.0,  0.5,  -0.5, 0.0,  0.5,
+    -0.5, 0.7, -0.5,   0.5, 0.7, -0.5,   0.5, 0.7,  0.5,  -0.5, 0.7,  0.5,
+    -0.5, 1.0,  0.0,   0.5, 1.0,  0.0,
+  ]);
+  const idx = new Uint16Array([
+    0,2,1, 0,3,2,            // base
+    0,1,5, 0,5,4,            // S wall
+    1,2,6, 1,6,5,            // E wall
+    2,3,7, 2,7,6,            // N wall
+    3,0,4, 3,4,7,            // W wall
+    4,8,7,                   // W gable
+    5,6,9,                   // E gable
+    4,5,9, 4,9,8,            // S roof
+    7,9,6, 7,8,9,            // N roof
+  ]);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(verts, 3));
+  geo.setIndex(new THREE.BufferAttribute(idx, 1));
+  geo.computeVertexNormals();
+  return geo;
+}
+
 function setBuildings(buildings) {
   if (!state.scene) return;
   console.info("[preview] setBuildings:", buildings.length);
@@ -303,8 +330,7 @@ function setBuildings(buildings) {
     });
   }
   const group = new THREE.Group();
-  const unitGeo = new THREE.BoxGeometry(1, 1, 1);
-  // Cache one material per colour string to keep draw calls low
+  const unitGeo = _pitchedBoxGeometry();
   const matCache = new Map();
   for (const b of buildings) {
     const [sx, sy, sz] = b.scale;
@@ -316,7 +342,7 @@ function setBuildings(buildings) {
     const m = new THREE.Mesh(unitGeo, mat);
     m.scale.set(sx, sy, sz);
     // BeamNG world: x east, y north, z up. Three.js: y up → swap y↔z
-    m.position.set(b.x, b.z + sz / 2, -b.y);
+    m.position.set(b.x, b.z, -b.y);
     m.rotation.y = -b.yaw;
     m.castShadow = true;
     m.receiveShadow = true;
@@ -324,6 +350,103 @@ function setBuildings(buildings) {
   }
   state.scene.add(group);
   state.buildingsGroup = group;
+}
+
+// ---------------------------------------------------------------------------
+// Foliage: trees as instanced cone+cylinder; hedges as scaled boxes
+// ---------------------------------------------------------------------------
+function setFoliage({ trees, hedges }) {
+  if (!state.scene) return;
+  console.info("[preview] setFoliage trees=%d hedges=%d", trees?.length ?? 0, hedges?.length ?? 0);
+  if (state.foliageGroup) {
+    state.scene.remove(state.foliageGroup);
+    state.foliageGroup.traverse((o) => {
+      if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); }
+    });
+  }
+  const group = new THREE.Group();
+
+  if (trees?.length) {
+    const trunkGeo = new THREE.CylinderGeometry(0.04, 0.05, 0.35, 6);
+    trunkGeo.translate(0, 0.175, 0);
+    const canopyGeo = new THREE.ConeGeometry(0.35, 0.65, 8);
+    canopyGeo.translate(0, 0.35 + 0.65 / 2, 0);
+    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5d4037, roughness: 0.95 });
+    const canopyMat = new THREE.MeshStandardMaterial({ color: 0x2e7d32, roughness: 0.85, flatShading: true });
+    const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, trees.length);
+    const canopies = new THREE.InstancedMesh(canopyGeo, canopyMat, trees.length);
+    trunks.castShadow = canopies.castShadow = true;
+    trunks.receiveShadow = canopies.receiveShadow = true;
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    for (let i = 0; i < trees.length; i++) {
+      const t = trees[i];
+      const [sx, sy, sz] = t.scale;
+      // Three.js Y-up: tree height runs along Y. BeamNG Z is height.
+      q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -t.yaw);
+      m.compose(
+        new THREE.Vector3(t.x, t.z, -t.y),
+        q,
+        new THREE.Vector3(sx, sz, sy),    // swap Y↔Z scale to match
+      );
+      trunks.setMatrixAt(i, m);
+      canopies.setMatrixAt(i, m);
+    }
+    trunks.instanceMatrix.needsUpdate = true;
+    canopies.instanceMatrix.needsUpdate = true;
+    group.add(trunks); group.add(canopies);
+  }
+
+  if (hedges?.length) {
+    const hedgeGeo = new THREE.BoxGeometry(1, 1, 1);
+    const hedgeMat = new THREE.MeshStandardMaterial({ color: 0x3f5a28, roughness: 0.95, flatShading: true });
+    const inst = new THREE.InstancedMesh(hedgeGeo, hedgeMat, hedges.length);
+    inst.castShadow = inst.receiveShadow = true;
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    for (let i = 0; i < hedges.length; i++) {
+      const h = hedges[i];
+      q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -h.yaw);
+      // Hedge slab is 1×1×1 with base at Z=0 in BeamNG → in Three.js +Y is up,
+      // so position centre is at z + height/2
+      m.compose(
+        new THREE.Vector3(h.x, h.z + h.height / 2, -h.y),
+        q,
+        new THREE.Vector3(h.length, h.height, h.width),
+      );
+      inst.setMatrixAt(i, m);
+    }
+    inst.instanceMatrix.needsUpdate = true;
+    group.add(inst);
+  }
+
+  state.scene.add(group);
+  state.foliageGroup = group;
+}
+
+// ---------------------------------------------------------------------------
+// Roads: simple line meshes along OSM centrelines, lifted off the terrain
+// ---------------------------------------------------------------------------
+function setRoads(roads) {
+  if (!state.scene) return;
+  console.info("[preview] setRoads:", roads.length);
+  if (state.roadsGroup) {
+    state.scene.remove(state.roadsGroup);
+    state.roadsGroup.traverse((o) => {
+      if (o.isMesh || o.isLine) { o.geometry.dispose(); o.material.dispose(); }
+    });
+  }
+  const group = new THREE.Group();
+  const mat = new THREE.LineBasicMaterial({ color: 0x1c1c1c });
+  for (const r of roads) {
+    const pts = [];
+    for (const [x, y, z] of r.nodes) pts.push(new THREE.Vector3(x, z + 0.2, -y));
+    if (pts.length < 2) continue;
+    const geo = new THREE.BufferGeometry().setFromPoints(pts);
+    group.add(new THREE.Line(geo, mat));
+  }
+  state.scene.add(group);
+  state.roadsGroup = group;
 }
 
 function loadImage(url) {
@@ -336,4 +459,4 @@ function loadImage(url) {
   });
 }
 
-window.MapNGPreview = { reset, setHeightmap, setTerrainTexture, setBuildings };
+window.MapNGPreview = { reset, setHeightmap, setTerrainTexture, setBuildings, setFoliage, setRoads };

@@ -32,8 +32,10 @@ import numpy as np
 from PIL import Image
 
 from mapng_ai import config
-from mapng_ai.assets.placeholder import write_unit_box_dae
+from mapng_ai.assets.placeholder import write_hedge_dae, write_pitched_dae, write_tree_dae
 from mapng_ai.pipeline.beamng_ter import write_ter
+from mapng_ai.pipeline.decal_roads import DecalRoad, write_road_decal_texture
+from mapng_ai.pipeline.foliage import FoliageResult, HedgeSegment, TreePlacement
 from mapng_ai.pipeline.placement import BuildingPlacement
 from mapng_ai.pipeline.splatting import SplatResult
 
@@ -127,11 +129,56 @@ def _building_tsstatics(level_name: str, buildings: Sequence[BuildingPlacement])
             "class": "TSStatic",
             "name": f"bld_{b.osm_id}",
             "shapeName": f"/levels/{level_name}/{b.asset.shape_relpath}",
-            # Box DAE is centred at origin, so lift by half the height
-            "position": [b.x_m, b.y_m, b.z_m + sz / 2.0],
+            # Pitched DAE is unit-1 with base at z=0 and ridge at z=1, so the
+            # placement Z is the terrain height (no half-height lift now).
+            "position": [b.x_m, b.y_m, b.z_m],
             "rotationMatrix": _yaw_rotation_matrix(b.yaw_rad),
             "scale": [sx, sy, sz],
-            "instanceColor": [0.78, 0.74, 0.62, 1.0],
+        })
+    return out
+
+
+def _tree_tsstatics(level_name: str, trees: Sequence[TreePlacement]) -> list[dict]:
+    out: list[dict] = []
+    for i, t in enumerate(trees):
+        sx, sy, sz = t.scale_xyz
+        out.append({
+            "class": "TSStatic",
+            "name": f"tree_{i}",
+            "shapeName": f"/levels/{level_name}/art/shapes/foliage/tree.dae",
+            "position": [t.x, t.y, t.z],
+            "rotationMatrix": _yaw_rotation_matrix(t.yaw),
+            "scale": [sx, sy, sz],
+        })
+    return out
+
+
+def _hedge_tsstatics(level_name: str, hedges: Sequence[HedgeSegment]) -> list[dict]:
+    out: list[dict] = []
+    for i, h in enumerate(hedges):
+        out.append({
+            "class": "TSStatic",
+            "name": f"hedge_{i}",
+            "shapeName": f"/levels/{level_name}/art/shapes/foliage/hedge.dae",
+            "position": [h.x, h.y, h.z],
+            "rotationMatrix": _yaw_rotation_matrix(h.yaw),
+            "scale": [h.length_m, h.width_m, h.height_m],
+        })
+    return out
+
+
+def _decal_roads_objects(roads: Sequence[DecalRoad]) -> list[dict]:
+    out: list[dict] = []
+    for road in roads:
+        out.append({
+            "class": "DecalRoad",
+            "name": f"road_{road.osm_id}",
+            "material": "MapNG_RoadDecal",
+            "improvedSpline": True,
+            "smoothness": 0.5,
+            "renderPriority": 10,
+            "textureLength": 12.0,
+            "nodes": [[x, y, z, road.width_m] for (x, y, z) in road.nodes_xyz],
         })
     return out
 
@@ -210,7 +257,9 @@ def _spawn_objects(spawn_x: float, spawn_y: float, spawn_z: float) -> list[dict]
 
 def _mission_group(level_name: str, size_m: float, terrain_min_m: float, terrain_max_m: float,
                    spawn_xyz: tuple[float, float, float],
-                   buildings: Sequence[BuildingPlacement]) -> dict:
+                   buildings: Sequence[BuildingPlacement],
+                   foliage: FoliageResult | None,
+                   roads: Sequence[DecalRoad]) -> dict:
     sx, sy, sz = spawn_xyz
     children = [
         {
@@ -228,16 +277,37 @@ def _mission_group(level_name: str, size_m: float, terrain_min_m: float, terrain
             "name": "buildings",
             "children": _building_tsstatics(level_name, buildings),
         })
+    if foliage and foliage.trees:
+        children.append({
+            "class": "SimGroup",
+            "name": "trees",
+            "children": _tree_tsstatics(level_name, foliage.trees),
+        })
+    if foliage and foliage.hedges:
+        children.append({
+            "class": "SimGroup",
+            "name": "hedges",
+            "children": _hedge_tsstatics(level_name, foliage.hedges),
+        })
+    if roads:
+        children.append({
+            "class": "SimGroup",
+            "name": "Decal_Roads",
+            "children": _decal_roads_objects(roads),
+        })
     return {"class": "SimGroup", "name": "MissionGroup", "children": children}
 
 
 def _items_level_root(level_name: str, size_m: float, t_min: float, t_max: float,
                       spawn: tuple[float, float, float],
-                      buildings: Sequence[BuildingPlacement]) -> dict:
+                      buildings: Sequence[BuildingPlacement],
+                      foliage: FoliageResult | None,
+                      roads: Sequence[DecalRoad]) -> dict:
     return {
         "class": "SimGroup",
         "name": "MissionCleanup",
-        "children": [_mission_group(level_name, size_m, t_min, t_max, spawn, buildings)],
+        "children": [_mission_group(level_name, size_m, t_min, t_max, spawn,
+                                    buildings, foliage, roads)],
     }
 
 
@@ -290,6 +360,8 @@ def write_level_package(
     material_names: list[str] | None = None,
     terrain_png_bytes: bytes | None = None,
     buildings: Sequence[BuildingPlacement] = (),
+    foliage: FoliageResult | None = None,
+    decal_roads: Sequence[DecalRoad] = (),
     splat: SplatResult | None = None,
 ) -> LevelPackage:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -361,17 +433,47 @@ def write_level_package(
     else:
         w(f"{base}/art/terrains/terrain.png", terrain_png_bytes or _flat_terrain_png())
 
-    # Building shape (single shared box.dae). Cache it in mapng_ai/cache/shapes/
-    # so we don't trip Windows file locks via tempfile cleanup.
+    # Building shapes — one DAE per unique resolved file (different OSM tags
+    # collapse to the same DAE, e.g. unknown tags → "default")
     if buildings:
-        shape_cache = config.CACHE_DIR / "shapes"
-        shape_cache.mkdir(parents=True, exist_ok=True)
-        box_path = shape_cache / "box.dae"
-        write_unit_box_dae(box_path)
-        w(f"{base}/art/shapes/buildings/box.dae", box_path.read_bytes())
+        seen: set[str] = set()
+        for b in buildings:
+            cache_path, rel = write_pitched_dae(b.asset.type_label)
+            if rel in seen:
+                continue
+            seen.add(rel)
+            w(f"{base}/{rel}", cache_path.read_bytes())
+        # Also rewrite each placement's shape_relpath consistently — the asset
+        # provider already resolved this, so nothing to do here.
+
+    # Foliage shapes (single tree DAE + single hedge DAE, used by all instances)
+    if foliage and (foliage.trees or foliage.hedges):
+        if foliage.trees:
+            tree_path, _ = write_tree_dae()
+            w(f"{base}/art/shapes/foliage/tree.dae", tree_path.read_bytes())
+        if foliage.hedges:
+            hedge_path, _ = write_hedge_dae()
+            w(f"{base}/art/shapes/foliage/hedge.dae", hedge_path.read_bytes())
+
+    # Decal road material + texture
+    if decal_roads:
+        road_tex = write_road_decal_texture()
+        w(f"{base}/art/road/road_decal.png", road_tex.read_bytes())
+        decal_mat = {
+            "MapNG_RoadDecal": {
+                "class": "Material",
+                "name": "MapNG_RoadDecal",
+                "diffuseMap": [f"levels/{level_name}/art/road/road_decal.png", "", "", ""],
+                "translucentBlendOp": "PreMulAlpha",
+                "translucent": True,
+                "alphaTest": False,
+            }
+        }
+        w(f"{base}/art/road/main.materials.json", json.dumps(decal_mat, indent=2))
 
     # Scene graph (the SimGroup tree BeamNG loads)
-    items = _items_level_root(level_name, side_m, t_min, t_max, spawn_xyz, buildings)
+    items = _items_level_root(level_name, side_m, t_min, t_max, spawn_xyz,
+                              buildings, foliage, decal_roads)
     w(f"{base}/main/items.level.json", json.dumps(items, indent=2))
 
     # Build the ZIP

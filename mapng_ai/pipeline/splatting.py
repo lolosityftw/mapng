@@ -24,6 +24,7 @@ from PIL import Image
 from scipy.ndimage import gaussian_filter
 
 from mapng_ai.pipeline.classmap import CLASSES, LandClass
+from mapng_ai.pipeline.textures import get_ground_texture
 
 
 _BLUR_SIGMA = 1.5
@@ -94,10 +95,8 @@ def build_splat(class_map: np.ndarray, out_dir: Path, *, seed: int = 1) -> Splat
         opacity_path = out_dir / f"opacity_{cls.key}.png"
         Image.fromarray(opacity_8, mode="L").save(opacity_path)
 
-        # 256×256 solid swatch as the per-class diffuse
-        swatch = np.tile(np.array(cls.color_rgb, dtype=np.uint8), (256, 256, 1))
-        diffuse_path = out_dir / f"diffuse_{cls.key}.png"
-        Image.fromarray(swatch).save(diffuse_path)
+        # Procedural PBR-ish diffuse — cached cross-job in textures.py
+        diffuse_path = get_ground_texture(cls.key).diffuse_path
 
         # Accumulate the combined preview
         combined += layer[..., None] * np.array(cls.color_rgb, dtype=np.float32)

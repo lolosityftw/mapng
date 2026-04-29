@@ -184,8 +184,12 @@ generateBtn.addEventListener("click", async () => {
     if (data.key === "splat" && data.combined_url) {
       window.MapNGPreview?.setTerrainTexture?.(data.combined_url);
     }
-    if (data.key === "place" && data.buildings) {
-      window.MapNGPreview?.setBuildings?.(data.buildings);
+    if (data.key === "place") {
+      if (data.buildings) window.MapNGPreview?.setBuildings?.(data.buildings);
+      if (data.trees || data.hedges) {
+        window.MapNGPreview?.setFoliage?.({ trees: data.trees || [], hedges: data.hedges || [] });
+      }
+      if (data.roads) window.MapNGPreview?.setRoads?.(data.roads);
     }
     if (data.key === "export" && data.zip_url) {
       addDownload(data.zip_url, `${data.level_name}.zip`, formatBytes(data.zip_bytes));

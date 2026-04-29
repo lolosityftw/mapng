@@ -15,6 +15,8 @@ from mapng_ai import config
 from mapng_ai.assets.placeholder import PlaceholderProvider
 from mapng_ai.pipeline.beamng_level import LevelPackage, write_level_package
 from mapng_ai.pipeline.classmap import build_class_map
+from mapng_ai.pipeline.decal_roads import DecalRoad, extract_decal_roads
+from mapng_ai.pipeline.foliage import FoliageResult, place_foliage
 from mapng_ai.pipeline.heightmap import HeightmapResult, build_heightmap
 from mapng_ai.pipeline.placement import BuildingPlacement, place_buildings
 from mapng_ai.pipeline.region import Region, resolve_region
@@ -40,6 +42,8 @@ class JobContext:
     class_map: "np.ndarray | None" = None
     splat: SplatResult | None = None
     buildings: list[BuildingPlacement] = field(default_factory=list)
+    foliage: FoliageResult | None = None
+    decal_roads: list[DecalRoad] = field(default_factory=list)
     level_package: LevelPackage | None = None
 
     artifacts: dict[str, str] = field(default_factory=dict)
@@ -144,11 +148,16 @@ async def stage_splat(ctx: JobContext, emit: Emit) -> None:
 async def stage_place(ctx: JobContext, emit: Emit) -> None:
     assert ctx.osm and ctx.region and ctx.heightmap
     provider = PlaceholderProvider()
+    hm = ctx.heightmap.elevations_m
+
     ctx.buildings = await asyncio.to_thread(
-        place_buildings, ctx.osm, ctx.region, ctx.heightmap.elevations_m, provider
+        place_buildings, ctx.osm, ctx.region, hm, provider
     )
-    # Send placement summary so the preview can draw boxes
-    payload = [
+    ctx.foliage = await asyncio.to_thread(place_foliage, ctx.osm, ctx.region, hm)
+    ctx.decal_roads = await asyncio.to_thread(extract_decal_roads, ctx.osm, ctx.region, hm)
+
+    # Three.js preview payload
+    buildings_payload = [
         {
             "x": p.x_m, "y": p.y_m, "z": p.z_m,
             "yaw": p.yaw_rad,
@@ -158,7 +167,30 @@ async def stage_place(ctx: JobContext, emit: Emit) -> None:
         }
         for p in ctx.buildings
     ]
-    await emit("stage:info", {"key": "place", "buildings": payload})
+    trees_payload = [
+        {"x": t.x, "y": t.y, "z": t.z, "yaw": t.yaw, "scale": list(t.scale_xyz)}
+        for t in ctx.foliage.trees
+    ]
+    hedges_payload = [
+        {"x": h.x, "y": h.y, "z": h.z, "yaw": h.yaw,
+         "length": h.length_m, "width": h.width_m, "height": h.height_m}
+        for h in ctx.foliage.hedges
+    ]
+    roads_payload = [
+        {"width": r.width_m, "nodes": [list(n) for n in r.nodes_xyz]}
+        for r in ctx.decal_roads
+    ]
+    await emit("stage:info", {
+        "key": "place",
+        "buildings": buildings_payload,
+        "trees": trees_payload,
+        "hedges": hedges_payload,
+        "roads": roads_payload,
+        "n_buildings": len(ctx.buildings),
+        "n_trees": len(ctx.foliage.trees),
+        "n_hedges": len(ctx.foliage.hedges),
+        "n_roads": len(ctx.decal_roads),
+    })
 
 
 async def stage_export(ctx: JobContext, emit: Emit) -> None:
@@ -171,6 +203,8 @@ async def stage_export(ctx: JobContext, emit: Emit) -> None:
         side_m=ctx.region.side_m,
         out_dir=ctx.out_dir,
         buildings=ctx.buildings,
+        foliage=ctx.foliage,
+        decal_roads=ctx.decal_roads,
         splat=ctx.splat,
     )
     ctx.level_package = pkg
@@ -182,6 +216,9 @@ async def stage_export(ctx: JobContext, emit: Emit) -> None:
         "zip_bytes": pkg.zip_path.stat().st_size,
         "spawn_xyz": list(pkg.spawn_xyz),
         "n_buildings": len(ctx.buildings),
+        "n_trees": len(ctx.foliage.trees) if ctx.foliage else 0,
+        "n_hedges": len(ctx.foliage.hedges) if ctx.foliage else 0,
+        "n_roads": len(ctx.decal_roads),
     })
 
 
