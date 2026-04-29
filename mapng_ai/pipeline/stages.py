@@ -12,17 +12,20 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from mapng_ai import config
-from mapng_ai.assets.placeholder import PlaceholderProvider
+from mapng_ai.assets.chain import ProviderChain
 from mapng_ai.pipeline.beamng_level import LevelPackage, write_level_package
 from mapng_ai.pipeline.classmap import build_class_map
 from mapng_ai.pipeline.decal_roads import DecalRoad, extract_decal_roads
 from mapng_ai.pipeline.foliage import FoliageResult, place_foliage
 from mapng_ai.pipeline.heightmap import HeightmapResult, build_heightmap
+from mapng_ai.pipeline.hsv_seg import classify_imagery, fuse_segmentation
+from mapng_ai.pipeline.imagery import ImageryResult, reproject_imagery
 from mapng_ai.pipeline.placement import BuildingPlacement, place_buildings
 from mapng_ai.pipeline.region import Region, resolve_region
 from mapng_ai.pipeline.splatting import SplatResult, build_splat
 from mapng_ai.sources.base import BBoxLL, ElevationSource, ElevationTile
 from mapng_ai.sources.coverage import select_elevation_source
+from mapng_ai.sources.esri import ImageryTile, default_imagery_source
 from mapng_ai.sources.overpass import OSMData, fetch_osm
 
 import numpy as np
@@ -39,6 +42,8 @@ class JobContext:
     elevation_tile: ElevationTile | None = None
     heightmap: HeightmapResult | None = None
     osm: OSMData | None = None
+    imagery_tile: ImageryTile | None = None
+    imagery: ImageryResult | None = None
     class_map: "np.ndarray | None" = None
     splat: SplatResult | None = None
     buildings: list[BuildingPlacement] = field(default_factory=list)
@@ -76,20 +81,35 @@ async def stage_region(ctx: JobContext, emit: Emit) -> None:
 
 async def stage_fetch(ctx: JobContext, emit: Emit) -> None:
     assert ctx.region and ctx.elevation_source
-    # Fetch elevation + OSM in parallel
+    imagery_source = default_imagery_source()
+    # All three fetches in parallel
     elev_task = asyncio.create_task(ctx.elevation_source.fetch(ctx.region.fetch_ll))
     osm_task = asyncio.create_task(fetch_osm(ctx.region.fetch_ll))
+    img_task = asyncio.create_task(imagery_source.fetch(ctx.region.fetch_ll))
     ctx.elevation_tile = await elev_task
     ctx.osm = await osm_task
+    try:
+        ctx.imagery_tile = await img_task
+    except Exception as exc:
+        # Imagery is best-effort — pipeline continues with procedural ground texture
+        await emit("stage:info", {"key": "fetch", "imagery_error": str(exc)})
+        ctx.imagery_tile = None
+
     rows, cols = ctx.elevation_tile.elevations_m.shape
     n_buildings = sum(1 for w in ctx.osm.ways if "building" in (w.get("tags") or {}))
     n_roads = sum(1 for w in ctx.osm.ways if "highway" in (w.get("tags") or {}))
-    await emit("stage:info", {
+    payload = {
         "key": "fetch",
         "tile_rows": int(rows), "tile_cols": int(cols),
         "osm_buildings": n_buildings, "osm_roads": n_roads,
         "osm_ways_total": len(ctx.osm.ways),
-    })
+    }
+    if ctx.imagery_tile is not None:
+        ih, iw = ctx.imagery_tile.rgb.shape[:2]
+        payload.update({"imagery_zoom": ctx.imagery_tile.zoom,
+                        "imagery_rows": ih, "imagery_cols": iw,
+                        "imagery_source": imagery_source.name})
+    await emit("stage:info", payload)
 
 
 async def stage_heightmap(ctx: JobContext, emit: Emit) -> None:
@@ -112,18 +132,43 @@ async def stage_heightmap(ctx: JobContext, emit: Emit) -> None:
 
 
 async def stage_segment(ctx: JobContext, emit: Emit) -> None:
-    """Phase 4 MVP: rasterise OSM features into a class map (no AI yet).
-
-    The pretrained-model upgrade per spec §4.1 will replace this function and
-    keep the same `class_map` output shape/semantics."""
+    """Combine OSM rasterise (deterministic) with HSV imagery classification
+    (per-pixel detail). OSM wins for trusted classes (roads, water); imagery
+    refines the rest."""
     assert ctx.osm and ctx.region
     size = ctx.region.heightmap_size
-    ctx.class_map = await asyncio.to_thread(build_class_map, ctx.osm, ctx.region, size)
-    # Class histogram for the UI
+
+    # 1) OSM rasterise (always)
+    osm_map = await asyncio.to_thread(build_class_map, ctx.osm, ctx.region, size)
+
+    used_imagery = False
+    if ctx.imagery_tile is not None:
+        # 2) Reproject imagery to ITM at heightmap resolution
+        ctx.imagery = await asyncio.to_thread(
+            reproject_imagery, ctx.imagery_tile, ctx.region, ctx.out_dir, size
+        )
+        ctx.artifacts["satellite"] = (
+            f"/api/jobs/{ctx.job_id}/files/{ctx.imagery.sat_png_path.name}"
+        )
+        # 3) HSV classify the ITM-aligned imagery
+        img_map = await asyncio.to_thread(classify_imagery, ctx.imagery.rgb)
+        # 4) Fuse — OSM trusted classes win over imagery
+        ctx.class_map = await asyncio.to_thread(fuse_segmentation, osm_map, img_map)
+        used_imagery = True
+    else:
+        ctx.class_map = osm_map
+
     unique, counts = np.unique(ctx.class_map, return_counts=True)
     total = float(counts.sum())
     hist = [{"id": int(u), "pct": round(float(c) / total * 100, 1)} for u, c in zip(unique, counts)]
-    await emit("stage:info", {"key": "segment", "source": "osm-rasterise", "histogram": hist})
+    payload = {
+        "key": "segment",
+        "source": "osm+imagery-hsv" if used_imagery else "osm-rasterise",
+        "histogram": hist,
+    }
+    if used_imagery:
+        payload["satellite_url"] = ctx.artifacts["satellite"]
+    await emit("stage:info", payload)
 
 
 async def stage_splat(ctx: JobContext, emit: Emit) -> None:
@@ -147,7 +192,7 @@ async def stage_splat(ctx: JobContext, emit: Emit) -> None:
 
 async def stage_place(ctx: JobContext, emit: Emit) -> None:
     assert ctx.osm and ctx.region and ctx.heightmap
-    provider = PlaceholderProvider()
+    provider = ProviderChain()
     hm = ctx.heightmap.elevations_m
 
     ctx.buildings = await asyncio.to_thread(
@@ -196,6 +241,10 @@ async def stage_place(ctx: JobContext, emit: Emit) -> None:
 async def stage_export(ctx: JobContext, emit: Emit) -> None:
     assert ctx.heightmap and ctx.region
     level_name = f"mapng_{ctx.job_id}"
+    terrain_png = None
+    if ctx.imagery is not None:
+        terrain_png = ctx.imagery.sat_png_path.read_bytes()
+
     pkg = await asyncio.to_thread(
         write_level_package,
         level_name=level_name,
@@ -206,6 +255,7 @@ async def stage_export(ctx: JobContext, emit: Emit) -> None:
         foliage=ctx.foliage,
         decal_roads=ctx.decal_roads,
         splat=ctx.splat,
+        terrain_png_bytes=terrain_png,
     )
     ctx.level_package = pkg
     ctx.artifacts["level_zip"] = f"/api/jobs/{ctx.job_id}/files/{pkg.zip_path.name}"

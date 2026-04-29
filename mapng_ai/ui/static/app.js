@@ -140,6 +140,7 @@ generateBtn.addEventListener("click", async () => {
   stagesEl.innerHTML = "";
   document.getElementById("downloads").hidden = true;
   document.getElementById("download-list").innerHTML = "";
+  window._satelliteUsed = false;
   window.MapNGPreview?.reset?.();
 
   const res = await fetch("/api/generate", {
@@ -181,7 +182,12 @@ generateBtn.addEventListener("click", async () => {
         maxM: data.max_m,
       }).catch((e) => console.error("[preview]", e));
     }
-    if (data.key === "splat" && data.combined_url) {
+    if (data.key === "segment" && data.satellite_url) {
+      // Real Esri imagery is far better than the splat blend — use it
+      window.MapNGPreview?.setTerrainTexture?.(data.satellite_url);
+      window._satelliteUsed = true;
+    }
+    if (data.key === "splat" && data.combined_url && !window._satelliteUsed) {
       window.MapNGPreview?.setTerrainTexture?.(data.combined_url);
     }
     if (data.key === "place") {

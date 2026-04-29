@@ -21,7 +21,7 @@ from mapng_ai.sources.base import BBoxLL, ElevationSource, ElevationTile
 
 TERRARIUM_URL = "https://elevation-tiles-prod.s3.amazonaws.com/terrarium/{z}/{x}/{y}.png"
 TILE_SIZE = 256
-DEFAULT_ZOOM = 13   # ~19 m/px at NI latitudes
+DEFAULT_ZOOM = 14   # ~9.5 m/px at NI latitudes — sharper than the 30 m product
 
 
 def _decode_terrarium(png_bytes: bytes) -> np.ndarray:

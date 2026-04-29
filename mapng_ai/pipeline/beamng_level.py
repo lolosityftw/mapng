@@ -422,16 +422,20 @@ def write_level_package(
     w(f"{base}/art/terrains/main.materials.json",
       json.dumps(_terrain_materials_json(level_name, side_m, splat), indent=2))
 
-    # Per-class diffuse + opacity layers (Phase 4) and a combined preview
+    # Per-class diffuse + opacity layers (Phase 4)
     if splat is not None:
         for layer in splat.layers:
             w(f"{base}/art/terrains/diffuse_{layer.cls.key}.png",
               layer.diffuse_path.read_bytes())
             w(f"{base}/art/terrains/opacity_{layer.cls.key}.png",
               layer.opacity_path.read_bytes())
+    # The base diffuse: real satellite imagery if available, else procedural blend
+    if terrain_png_bytes is not None:
+        w(f"{base}/art/terrains/terrain.png", terrain_png_bytes)
+    elif splat is not None:
         w(f"{base}/art/terrains/terrain.png", splat.combined_diffuse_path.read_bytes())
     else:
-        w(f"{base}/art/terrains/terrain.png", terrain_png_bytes or _flat_terrain_png())
+        w(f"{base}/art/terrains/terrain.png", _flat_terrain_png())
 
     # Building shapes — one DAE per unique resolved file (different OSM tags
     # collapse to the same DAE, e.g. unknown tags → "default")
