@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import uuid
 from typing import AsyncIterator
@@ -16,6 +17,17 @@ from sse_starlette.sse import EventSourceResponse
 
 from mapng_ai import config
 from mapng_ai.pipeline import BBox, JobContext, run_pipeline
+
+
+# Load .env (project root) before anything reads env vars
+_dotenv = config.ROOT / ".env"
+if _dotenv.exists():
+    for line in _dotenv.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip())
 
 
 config.ensure_runtime_dirs()

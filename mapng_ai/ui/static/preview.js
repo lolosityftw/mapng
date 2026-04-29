@@ -313,12 +313,12 @@ async function setHeightmap({ url, sideMeters, minM, maxM, segments = 256 }) {
   }
 }
 
-function setTerrainTexture(url) {
+function setTerrainTexture(url, normalUrl) {
   if (!state.terrainMesh) {
     console.warn("[preview] setTerrainTexture before terrain mesh");
     return;
   }
-  console.info("[preview] setTerrainTexture", url);
+  console.info("[preview] setTerrainTexture", url, "normal:", normalUrl);
   const loader = new THREE.TextureLoader();
   loader.crossOrigin = "anonymous";
   loader.load(url, (tex) => {
@@ -329,15 +329,28 @@ function setTerrainTexture(url) {
     state.terrainMesh.material.map = tex;
     state.terrainMesh.material.color = new THREE.Color(0xffffff);
     state.terrainMesh.material.needsUpdate = true;
-  }, undefined, (err) => console.error("[preview] texture load failed", err));
+  }, undefined, (err) => console.error("[preview] diffuse load failed", err));
+  if (normalUrl) {
+    loader.load(normalUrl, (tex) => {
+      tex.flipY = true;
+      tex.needsUpdate = true;
+      state.terrainMesh.material.normalMap = tex;
+      state.terrainMesh.material.normalScale = new THREE.Vector2(1.5, 1.5);
+      state.terrainMesh.material.needsUpdate = true;
+    }, undefined, (err) => console.error("[preview] normal load failed", err));
+  }
 }
 
 // ---------------------------------------------------------------------------
-function _pitchedBoxGeometry() {
+// Pitched (steep ridge) and flat (industrial) roof variants share the same
+// vertex/index layout so InstancedMesh can swap them transparently.
+function _buildingGeometry({ flat = false } = {}) {
+  const boxH = flat ? 1.0 : 0.7;
+  const ridgeZ = flat ? 1.0 : 1.0;
   const verts = new Float32Array([
     -0.5, 0.0, -0.5,   0.5, 0.0, -0.5,   0.5, 0.0,  0.5,  -0.5, 0.0,  0.5,
-    -0.5, 0.7, -0.5,   0.5, 0.7, -0.5,   0.5, 0.7,  0.5,  -0.5, 0.7,  0.5,
-    -0.5, 1.0,  0.0,   0.5, 1.0,  0.0,
+    -0.5, boxH, -0.5,  0.5, boxH, -0.5,  0.5, boxH, 0.5,  -0.5, boxH, 0.5,
+    -0.5, ridgeZ, 0.0, 0.5, ridgeZ, 0.0,
   ]);
   const idx = new Uint16Array([
     0,2,1, 0,3,2,
@@ -357,6 +370,12 @@ function _pitchedBoxGeometry() {
   return geo;
 }
 
+const _FLAT_ROOF_TYPES = new Set([
+  "industrial", "warehouse", "garage", "shed", "barn",
+  "commercial", "retail", "shop", "office",
+]);
+function _isFlatRoof(t) { return _FLAT_ROOF_TYPES.has(t); }
+
 function setBuildings(buildings) {
   if (!state.scene) return;
   console.info("[preview] setBuildings:", buildings.length);
@@ -367,19 +386,21 @@ function setBuildings(buildings) {
     });
   }
   const group = new THREE.Group();
-  const unitGeo = _pitchedBoxGeometry();
-  const matCache = new Map();
-  // One shared geometry per unique colour → InstancedMesh per group
-  const byColor = new Map();
+  const pitchedGeo = _buildingGeometry({ flat: false });
+  const flatGeo = _buildingGeometry({ flat: true });
+  // Bucket by (color, roofStyle)
+  const byBucket = new Map();
   for (const b of buildings) {
-    if (!byColor.has(b.color)) byColor.set(b.color, []);
-    byColor.get(b.color).push(b);
+    const flat = _isFlatRoof(b.type);
+    const key = `${b.color}|${flat ? "f" : "p"}`;
+    if (!byBucket.has(key)) byBucket.set(key, { color: b.color, flat, list: [] });
+    byBucket.get(key).list.push(b);
   }
-  for (const [color, list] of byColor.entries()) {
+  const m = new THREE.Matrix4(); const q = new THREE.Quaternion();
+  for (const { color, flat, list } of byBucket.values()) {
     const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.85 });
-    const inst = new THREE.InstancedMesh(unitGeo, mat, list.length);
+    const inst = new THREE.InstancedMesh(flat ? flatGeo : pitchedGeo, mat, list.length);
     inst.castShadow = inst.receiveShadow = true;
-    const m = new THREE.Matrix4(); const q = new THREE.Quaternion();
     for (let i = 0; i < list.length; i++) {
       const b = list[i];
       const [sx, sy, sz] = b.scale;

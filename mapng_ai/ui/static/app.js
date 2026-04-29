@@ -184,7 +184,7 @@ generateBtn.addEventListener("click", async () => {
     }
     if (data.key === "segment" && data.satellite_url) {
       // Real Esri imagery is far better than the splat blend — use it
-      window.MapNGPreview?.setTerrainTexture?.(data.satellite_url);
+      window.MapNGPreview?.setTerrainTexture?.(data.satellite_url, data.satellite_normal_url);
       window._satelliteUsed = true;
     }
     if (data.key === "splat" && data.combined_url && !window._satelliteUsed) {

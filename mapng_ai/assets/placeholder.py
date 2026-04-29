@@ -62,22 +62,31 @@ def _hex_to_rgba(h: str, a: int = 255) -> list[int]:
     return [int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), a]
 
 
+_FLAT_ROOF_TYPES: frozenset[str] = frozenset({
+    "industrial", "warehouse", "garage", "shed", "barn",
+    "commercial", "retail", "shop", "office",
+})
+
+
 # ---------------------------------------------------------------------------
 # Pitched-roof box: 1×1×1 unit shape; the BeamNG TSStatic scales per instance
 # ---------------------------------------------------------------------------
-def _build_pitched_box(wall_rgba: list[int], roof_rgba: list[int]) -> trimesh.Trimesh:
-    box_h = 0.7   # walls take 70 %, roof takes 30 %
+def _build_pitched_box(wall_rgba: list[int], roof_rgba: list[int],
+                        flat_roof: bool = False) -> trimesh.Trimesh:
+    box_h = 1.0 if flat_roof else 0.7
+    # For flat-roof buildings the "ridge" verts collapse to box-top corners
+    ridge_z = box_h if flat_roof else 1.0
     verts = np.array([
-        [-0.5, -0.5, 0],   # 0  SW base
-        [ 0.5, -0.5, 0],   # 1  SE base
-        [ 0.5,  0.5, 0],   # 2  NE base
-        [-0.5,  0.5, 0],   # 3  NW base
-        [-0.5, -0.5, box_h],  # 4  SW top of box
-        [ 0.5, -0.5, box_h],  # 5  SE top
-        [ 0.5,  0.5, box_h],  # 6  NE top
-        [-0.5,  0.5, box_h],  # 7  NW top
-        [-0.5,  0.0, 1.0],    # 8  W ridge
-        [ 0.5,  0.0, 1.0],    # 9  E ridge
+        [-0.5, -0.5, 0],          # 0  SW base
+        [ 0.5, -0.5, 0],          # 1  SE base
+        [ 0.5,  0.5, 0],          # 2  NE base
+        [-0.5,  0.5, 0],          # 3  NW base
+        [-0.5, -0.5, box_h],      # 4  SW top of box
+        [ 0.5, -0.5, box_h],      # 5  SE top
+        [ 0.5,  0.5, box_h],      # 6  NE top
+        [-0.5,  0.5, box_h],      # 7  NW top
+        [-0.5,  0.0, ridge_z],    # 8  W ridge (= box top at midline if flat)
+        [ 0.5,  0.0, ridge_z],    # 9  E ridge
     ], dtype=np.float64)
 
     # Each tuple = (face indices, is_roof?)
@@ -137,7 +146,8 @@ def write_pitched_dae(building_type: str) -> tuple[Path, str]:
         return cache_path, rel
     wall = _hex_to_rgba(_TYPE_COLORS.get(building_type, _TYPE_COLORS["default"]))
     roof = _hex_to_rgba(_ROOF_COLORS.get(building_type, _ROOF_COLORS["default"]))
-    mesh = _build_pitched_box(wall, roof)
+    flat = building_type in _FLAT_ROOF_TYPES
+    mesh = _build_pitched_box(wall, roof, flat_roof=flat)
     mesh.export(cache_path)
     return cache_path, rel
 

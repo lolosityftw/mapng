@@ -437,18 +437,30 @@ def write_level_package(
     else:
         w(f"{base}/art/terrains/terrain.png", _flat_terrain_png())
 
-    # Building shapes — one DAE per unique resolved file (different OSM tags
-    # collapse to the same DAE, e.g. unknown tags → "default")
+    # Building shapes — one DAE/GLB per unique resolved file. AI-generated
+    # GLBs (from Meshy etc.) live in the Meshy cache; placeholder DAEs in
+    # the shapes cache. Both look the same to BeamNG.
+    from mapng_ai.assets.meshy import _CACHE_DIR as _MESHY_CACHE
     if buildings:
         seen: set[str] = set()
         for b in buildings:
-            cache_path, rel = write_pitched_dae(b.asset.type_label)
+            rel = b.asset.shape_relpath
             if rel in seen:
                 continue
             seen.add(rel)
-            w(f"{base}/{rel}", cache_path.read_bytes())
-        # Also rewrite each placement's shape_relpath consistently — the asset
-        # provider already resolved this, so nothing to do here.
+            if rel.startswith("art/shapes/buildings_ai/"):
+                # Meshy: filename is meshy_<key>.glb in the cache
+                stem = Path(rel).stem.replace("meshy_", "")
+                glb = _MESHY_CACHE / f"{stem}.glb"
+                if glb.exists():
+                    w(f"{base}/{rel}", glb.read_bytes())
+                    continue
+                # Fallback if cache went missing somehow → write placeholder
+            cache_path, fallback_rel = write_pitched_dae(
+                b.asset.type_label.replace("_meshy", "")
+            )
+            w(f"{base}/{rel if rel.endswith('.dae') else fallback_rel}",
+              cache_path.read_bytes())
 
     # Foliage shapes (single tree DAE + single hedge DAE, used by all instances)
     if foliage and (foliage.trees or foliage.hedges):

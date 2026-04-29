@@ -43,7 +43,8 @@ def _rgb_to_hsv(rgb: np.ndarray) -> np.ndarray:
     h[gmax] = ((b[gmax] - r[gmax]) / delta[gmax]) + 2
     h[bmax] = ((r[bmax] - g[bmax]) / delta[bmax]) + 4
     h = h / 6.0
-    s = np.where(cmax > 1e-6, delta / cmax, 0.0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        s = np.where(cmax > 1e-6, delta / np.where(cmax > 1e-6, cmax, 1.0), 0.0)
     v = cmax
     return np.stack([h, s, v], axis=-1).astype(np.float32)
 
