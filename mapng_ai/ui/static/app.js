@@ -2,6 +2,24 @@
    Map picker (Leaflet) + progress feed (SSE) + library batch panel.
    3D preview lives in preview.js as an ES module. */
 
+// ---- Quality selector -------------------------------------------------------
+const qualitySel = document.getElementById("quality");
+const sceneSize = document.getElementById("scene-size");
+window._mapngQuality = (qualitySel?.value) || "medium";
+qualitySel?.addEventListener("change", () => {
+  window._mapngQuality = qualitySel.value;
+  // Drop the GLB cache so the next setBuildings/setFoliage refetches at new quality
+  window.MapNGPreview?.invalidateGlbCache?.();
+  // If we have last-seen placements, re-apply with the new quality
+  const last = window._mapngLastPlace;
+  if (last) {
+    if (last.buildings) window.MapNGPreview?.setBuildings?.(last.buildings);
+    if (last.trees || last.hedges) {
+      window.MapNGPreview?.setFoliage?.({ trees: last.trees || [], hedges: last.hedges || [] });
+    }
+  }
+});
+
 // ---- Library status indicator (link to /library for management) -----------
 const libStatus = document.getElementById("lib-status");
 async function refreshLibStatus() {
@@ -206,11 +224,16 @@ generateBtn.addEventListener("click", async () => {
       window.MapNGPreview?.setTerrainTexture?.(data.combined_url);
     }
     if (data.key === "place") {
+      window._mapngLastPlace = data;        // remember for quality switches
       if (data.buildings) window.MapNGPreview?.setBuildings?.(data.buildings);
       if (data.trees || data.hedges) {
         window.MapNGPreview?.setFoliage?.({ trees: data.trees || [], hedges: data.hedges || [] });
       }
       if (data.roads) window.MapNGPreview?.setRoads?.(data.roads);
+      const totalUnique = data.buildings ? new Set(data.buildings.map(b => b.shape).filter(Boolean)).size : 0;
+      const treeUnique = data.trees ? new Set(data.trees.map(t => t.shape).filter(Boolean)).size : 0;
+      sceneSize.innerHTML = `<strong>${data.n_buildings || 0}</strong> buildings (${totalUnique} unique meshes), ` +
+                            `<strong>${data.n_trees || 0}</strong> trees (${treeUnique} unique)`;
     }
     if (data.key === "export" && data.zip_url) {
       addDownload(data.zip_url, `${data.level_name}.zip`, formatBytes(data.zip_bytes));

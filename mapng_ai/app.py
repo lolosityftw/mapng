@@ -337,15 +337,18 @@ async def get_entry_glb(slug: str) -> FileResponse:
 
 # ---- Library asset serving (used by /preview) -------------------------------
 @app.get("/api/asset")
-async def get_asset_by_relpath(path: str) -> FileResponse:
+async def get_asset_by_relpath(path: str, quality: str = "ultra") -> FileResponse:
     """Serve a GLB/DAE/PNG from `assets/` by its in-zip relative path.
 
-    Translates `art/shapes/buildings_lib/<type>/<file>` and
-    `art/shapes/trees_lib/<type>/<file>` back to the on-disk location under
-    `assets/buildings/` or `assets/trees/`.
+    `quality=ultra|high|medium|low|minimum` triggers texture downscaling on
+    GLBs (cached on disk per quality). `ultra` returns the original.
     """
+    from mapng_ai.library_builder.optimise import optimise, QUALITY_PRESETS
+
     if ".." in path or path.startswith(("/", "\\")):
         raise HTTPException(400, "Invalid path")
+    if quality not in QUALITY_PRESETS:
+        raise HTTPException(400, f"Unknown quality: {quality}")
 
     fs: Path | None = None
     if path.startswith("art/shapes/buildings_lib/"):
@@ -365,12 +368,33 @@ async def get_asset_by_relpath(path: str) -> FileResponse:
     if not str(fs).startswith(str(root)) or not fs.exists():
         raise HTTPException(404, f"Asset not found: {path}")
 
+    # GLBs honour the quality query param — DAEs/PNGs serve as-is
+    if fs.suffix.lower() == ".glb":
+        fs = await asyncio.to_thread(optimise, fs, quality)
+
     media = {".glb": "model/gltf-binary", ".gltf": "model/gltf+json", ".dae": "model/vnd.collada+xml"}
     return FileResponse(
         fs,
         media_type=media.get(fs.suffix.lower(), "application/octet-stream"),
         headers={"Cache-Control": "public, max-age=3600"},
     )
+
+
+@app.get("/api/library/entries/{slug}/stats")
+async def get_entry_stats(slug: str) -> dict:
+    """Per-entry mesh stats (triangles, texture dims, file size at each quality)."""
+    from mapng_ai.library_builder import CATALOGUE
+    from mapng_ai.library_builder.optimise import stats_for_all_qualities
+    from mapng_ai.library_builder.runner import target_glb
+
+    entry = next((e for e in CATALOGUE if e.slug == slug), None)
+    if entry is None:
+        raise HTTPException(404, f"unknown slug: {slug}")
+    glb = target_glb(entry)
+    if not glb.exists():
+        return {"slug": slug, "exists": False}
+    qualities = await asyncio.to_thread(stats_for_all_qualities, glb)
+    return {"slug": slug, "exists": True, "qualities": qualities}
 
 
 # ---- Terrain PBR pack -------------------------------------------------------

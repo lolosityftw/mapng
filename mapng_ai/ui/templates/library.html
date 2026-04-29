@@ -92,6 +92,17 @@
         <button id="d-regenerate" class="ghost">Regenerate</button>
         <button id="d-delete" class="danger">Delete cache</button>
       </div>
+
+      <div id="d-stats" class="stats-block" hidden>
+        <h3>Mesh stats</h3>
+        <table class="stats-table">
+          <thead><tr>
+            <th>Quality</th><th>Max texture</th><th>File</th><th>GPU textures</th>
+          </tr></thead>
+          <tbody id="d-stats-body"></tbody>
+        </table>
+        <small class="hint">GPU texture estimate is uncompressed RGBA × image_count. Triangle count: <span id="d-tris">…</span></small>
+      </div>
       <div class="preview-wrap">
         <h3>3D preview</h3>
         <div id="preview3d"></div>

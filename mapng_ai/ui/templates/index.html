@@ -42,8 +42,19 @@
 
   <section id="preview-pane">
     <h2>3. Preview</h2>
+    <div class="preview-bar">
+      <label>Mesh quality
+        <select id="quality">
+          <option value="low">Low (256 px) · ~9 MB GPU</option>
+          <option value="medium" selected>Medium (512 px) · ~36 MB GPU</option>
+          <option value="high">High (1024 px) · ~140 MB GPU</option>
+          <option value="ultra">Ultra (full size) · ~575 MB GPU</option>
+        </select>
+      </label>
+      <span id="scene-size" class="scene-size"></span>
+    </div>
     <div id="preview"></div>
-    <small class="hint">Phase 0: empty stage. Heightmap mesh appears at Phase 1, buildings at Phase 3, materials at Phase 4.</small>
+    <small class="hint">Drag to orbit · scroll to zoom · drop quality if FPS lags.</small>
   </section>
 
 </main>

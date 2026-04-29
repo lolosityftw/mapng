@@ -112,6 +112,24 @@ button:not(:disabled):hover { background: #3fb950; }
 #stages li .bar > div { height: 100%; background: #d29922; width: 0; transition: width 200ms ease; }
 #stages li.done .bar > div { background: #3fb950; width: 100% !important; }
 
+.preview-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px; gap: 12px;
+}
+.preview-bar label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: #7d8590;
+}
+.preview-bar select {
+  background: #0d1117; color: #e6e8eb; border: 1px solid #2a2f37;
+  padding: 4px 8px; border-radius: 4px; font-size: 12px;
+}
+.scene-size {
+  font-family: ui-monospace, Consolas, monospace; font-size: 11px;
+  color: #6e7681;
+}
+.scene-size strong { color: #adbac7; font-weight: 500; }
+
 #preview { flex: 1; min-height: 300px; background: #0d1117; border-radius: 4px; position: relative; }
 .hint { color: #545c66; font-size: 11px; margin-top: 8px; }
 

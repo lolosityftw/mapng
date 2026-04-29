@@ -404,11 +404,14 @@ function _hideLoadingBadge() {
 }
 
 async function _loadGlb(shapeRelpath) {
-  let cached = _glbCache.get(shapeRelpath);
+  const quality = window._mapngQuality || "medium";
+  const cacheKey = `${shapeRelpath}|${quality}`;
+  let cached = _glbCache.get(cacheKey);
   if (cached) return cached;
+  const url = `/api/asset?path=${encodeURIComponent(shapeRelpath)}&quality=${quality}`;
   const promise = new Promise((resolve, reject) => {
     _gltfLoader.load(
-      `/api/asset?path=${encodeURIComponent(shapeRelpath)}`,
+      url,
       (gltf) => {
         const scene = gltf.scene;
         scene.traverse((o) => {
@@ -430,15 +433,36 @@ async function _loadGlb(shapeRelpath) {
       (err) => reject(err),
     );
   });
-  _glbCache.set(shapeRelpath, promise);
+  _glbCache.set(cacheKey, promise);
   try {
     const result = await promise;
-    _glbCache.set(shapeRelpath, result);
+    _glbCache.set(cacheKey, result);
     return result;
   } catch (e) {
-    _glbCache.delete(shapeRelpath);
+    _glbCache.delete(cacheKey);
     throw e;
   }
+}
+
+function invalidateGlbCache() {
+  // Drop scene refs so old quality assets can be GC'd
+  for (const v of _glbCache.values()) {
+    if (v && typeof v === "object" && v.scene) {
+      v.scene.traverse?.((o) => {
+        if (o.isMesh) {
+          o.geometry?.dispose?.();
+          (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => {
+            if (!m) return;
+            for (const k of ["map", "normalMap", "roughnessMap", "metalnessMap", "emissiveMap"]) {
+              m[k]?.dispose?.();
+            }
+            m.dispose?.();
+          });
+        }
+      });
+    }
+  }
+  _glbCache.clear();
 }
 
 // Placeholder geometry used when a GLB is missing or fails to load
@@ -655,4 +679,7 @@ function loadImage(url) {
   });
 }
 
-window.MapNGPreview = { reset, setHeightmap, setTerrainTexture, setBuildings, setFoliage, setRoads };
+window.MapNGPreview = {
+  reset, setHeightmap, setTerrainTexture, setBuildings, setFoliage, setRoads,
+  invalidateGlbCache,
+};

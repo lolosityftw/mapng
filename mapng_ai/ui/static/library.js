@@ -182,6 +182,43 @@ function selectEntry(slug) {
   els.d.regenerate.hidden = !e.built;
   els.d.delete.hidden = !e.built;
   loadPreview(e);
+  loadStats(e);
+}
+
+async function loadStats(e) {
+  const block = document.getElementById("d-stats");
+  const body = document.getElementById("d-stats-body");
+  const trisEl = document.getElementById("d-tris");
+  if (!e.built) { block.hidden = true; return; }
+  block.hidden = false;
+  body.innerHTML = `<tr><td colspan="4">loading…</td></tr>`;
+  try {
+    const r = await fetch(`/api/library/entries/${e.slug}/stats`);
+    const data = await r.json();
+    if (!data.exists) { block.hidden = true; return; }
+    const order = ["ultra", "high", "medium", "low", "minimum"];
+    const fmt = (n) => n < 1024 ? `${n} B`
+                       : n < 1024 ** 2 ? `${(n / 1024).toFixed(1)} KB`
+                       : `${(n / 1024 ** 2).toFixed(1)} MB`;
+    body.innerHTML = order.map((q) => {
+      const s = data.qualities[q];
+      const built = s?.exists ?? false;
+      const dim = s?.image_max_dim || s?.max_dim_target || 0;
+      const file = built && s.file_size ? fmt(s.file_size) : "(not built)";
+      const gpu = s?.gpu_texture_bytes ? fmt(s.gpu_texture_bytes) : "—";
+      return `<tr class="${built ? '' : 'missing'}">
+                <td>${q}</td>
+                <td>${dim ? dim + ' px' : '—'}</td>
+                <td>${file}</td>
+                <td>${gpu}</td>
+              </tr>`;
+    }).join("");
+    trisEl.textContent = data.qualities.ultra?.triangle_count
+      ? data.qualities.ultra.triangle_count.toLocaleString()
+      : "?";
+  } catch (err) {
+    body.innerHTML = `<tr><td colspan="4">stats failed: ${err}</td></tr>`;
+  }
 }
 
 // ---- Three.js scene for the detail pane ----

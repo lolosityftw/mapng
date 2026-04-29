@@ -133,3 +133,25 @@ tr.fail    .c-icon span { color: #f85149; }
   border-radius: 6px; position: relative; overflow: hidden;
 }
 .preview-wrap .hint { color: #6e7681; font-size: 11px; margin-top: 6px; display: block; }
+
+.stats-block { margin-top: 18px; }
+.stats-block h3 {
+  margin: 0 0 8px; font-size: 12px; font-weight: 600; color: #adbac7;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.stats-table {
+  width: 100%; border-collapse: collapse; font-size: 12px;
+  background: #14171c; border-radius: 6px; overflow: hidden;
+  font-family: ui-monospace, Consolas, monospace;
+}
+.stats-table th {
+  text-align: left; padding: 6px 12px; background: #1f2630;
+  color: #7d8590; font-weight: 600; font-size: 10px;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.stats-table td {
+  padding: 6px 12px; border-top: 1px solid #1c2129; color: #adbac7;
+}
+.stats-table tr.current td { background: #1f2630; color: #e6e8eb; font-weight: 600; }
+.stats-table tr.missing td { color: #6e7681; font-style: italic; }
+.stats-block .hint { color: #6e7681; font-size: 11px; margin-top: 6px; display: block; }
