@@ -1,28 +1,23 @@
-"""Meshy text-to-3D engine — the first real AI building/asset provider.
+"""Meshy text-to-3D engine — preview + refine for textured GLBs.
 
-Setup:
+Setup (.env at project root):
 
-    set MAPNG_API_ENGINE=meshy
-    set MAPNG_API_KEY=<your meshy api key from https://www.meshy.ai>
+    MAPNG_API_ENGINE=meshy
+    MAPNG_API_KEY=<key from https://www.meshy.ai>
+    MAPNG_MESHY_CONCURRENCY=10
+    MAPNG_MESHY_RPS=20
+    MAPNG_MESHY_TEXTURE=1     # 1 = refine pass (PBR textures), 0 = preview only
 
-Or in your shell rc:
+Two-stage generation:
+    1. POST /v2/text-to-3d  mode=preview          → preview_task_id
+       Poll until SUCCEEDED                       → preview GLB ready
+    2. POST /v2/text-to-3d  mode=refine,
+            preview_task_id=<id>                  → refine_task_id
+       Poll until SUCCEEDED                       → textured GLB ready
 
-    export MAPNG_API_ENGINE=meshy
-    export MAPNG_API_KEY=...
-
-How it works:
-    - We send a text prompt seeded from the OSM building tags
-      (e.g. "two storey red brick semi-detached house with slate roof,
-       ground floor windows, exterior")
-    - Meshy returns a GLB — we cache it on disk and convert to DAE for BeamNG
-    - Subsequent runs hitting the same cache key skip the API call entirely
-    - Generation is slow (30-90 s per building), so we cap the count and
-      prioritise the largest / most visible buildings; the rest fall back
-      to PlaceholderProvider
-
-Cost control:
-    MAPNG_MESHY_MAX_BUILDINGS  (default 12)  — hard cap per generation
-    MAPNG_MESHY_MIN_AREA_M2    (default 80)  — skip tiny footprints
+Refined GLB is what we cache and ship. If the refine pass fails for any
+reason, we fall back to the untextured preview GLB so the build doesn't
+abort.
 """
 from __future__ import annotations
 
@@ -50,7 +45,6 @@ _CACHE_DIR = config.CACHE_DIR / "meshy"
 
 
 def _cfg() -> tuple[str, str] | None:
-    """Return (api_key, base_url) if env is configured, else None."""
     if os.environ.get("MAPNG_API_ENGINE", "").lower() != "meshy":
         return None
     key = os.environ.get("MAPNG_API_KEY")
@@ -60,8 +54,40 @@ def _cfg() -> tuple[str, str] | None:
     return key, base
 
 
+def _envf(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+def _envb(name: str, default: bool) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v.strip().lower() not in ("0", "false", "no", "off", "")
+
+
 # ---------------------------------------------------------------------------
-# Prompt builder — OSM tags → text description
+# Rate limiter — serialised "no more than rps requests per second"
+# ---------------------------------------------------------------------------
+class _RateLimiter:
+    def __init__(self, rate: float) -> None:
+        self._min_interval = 1.0 / max(rate, 0.001)
+        self._next_allowed = 0.0
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            wait = max(0.0, self._next_allowed - now)
+            self._next_allowed = max(now, self._next_allowed) + self._min_interval
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+
+# ---------------------------------------------------------------------------
+# Prompt builder
 # ---------------------------------------------------------------------------
 def _prompt_for_building(building_type: str, levels: int, footprint_m2: float, seed: int) -> str:
     type_word = {
@@ -82,18 +108,12 @@ def _prompt_for_building(building_type: str, levels: int, footprint_m2: float, s
         "barn":        "stone barn with slate roof",
         "default":     "rural building",
     }.get(building_type, "rural building")
-
     descriptors = []
-    if footprint_m2 < 100:
-        descriptors.append("small")
-    elif footprint_m2 > 600:
-        descriptors.append("large")
-    if levels >= 3:
-        descriptors.append(f"{levels} storey")
-
+    if footprint_m2 < 100: descriptors.append("small")
+    elif footprint_m2 > 600: descriptors.append("large")
+    if levels >= 3: descriptors.append(f"{levels} storey")
     style_words = ["Northern Ireland rural style", "weathered exterior",
                    "realistic", "exterior only"]
-
     parts = ["a"] + descriptors + [type_word] + ["in " + ", ".join(style_words)]
     return " ".join(parts)
 
@@ -103,14 +123,21 @@ def _prompt_for_building(building_type: str, levels: int, footprint_m2: float, s
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class MeshyAsset:
-    fs_path: Path        # filesystem location of cached GLB
-    rel_path: str        # relative path inside the level zip
+    fs_path: Path
+    rel_path: str
 
 
 class MeshyEngine:
-    def __init__(self, max_concurrency: int = 4) -> None:
+    def __init__(self,
+                 max_concurrency: int | None = None,
+                 rate_per_sec: float | None = None,
+                 texture: bool | None = None) -> None:
         self.cfg = _cfg()
-        self._sem = asyncio.Semaphore(max_concurrency)
+        self.concurrency = int(max_concurrency or _envf("MAPNG_MESHY_CONCURRENCY", 10))
+        self.rps = float(rate_per_sec or _envf("MAPNG_MESHY_RPS", 20))
+        self.texture = _envb("MAPNG_MESHY_TEXTURE", True) if texture is None else bool(texture)
+        self._sem = asyncio.Semaphore(self.concurrency)
+        self._limiter = _RateLimiter(self.rps)
         if self.cfg:
             _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -118,18 +145,75 @@ class MeshyEngine:
     def configured(self) -> bool:
         return self.cfg is not None
 
-    def cache_key(self, prompt: str, seed: int) -> str:
-        return hashlib.sha1(f"{prompt}|{seed}".encode()).hexdigest()[:20]
+    def cache_key(self, prompt: str, seed: int, texture: bool) -> str:
+        # texture flag is part of the key — preview-only and textured are
+        # separate cached artefacts.
+        salt = "tex" if texture else "raw"
+        return hashlib.sha1(f"{prompt}|{seed}|{salt}".encode()).hexdigest()[:20]
 
     def cached_glb(self, key: str) -> Path:
         return _CACHE_DIR / f"{key}.glb"
 
+    # ---- HTTP helpers ----------------------------------------------------
+    async def _request(self, client: httpx.AsyncClient, method: str, url: str,
+                       **kwargs) -> httpx.Response:
+        await self._limiter.acquire()
+        return await client.request(method, url, **kwargs)
+
+    async def _submit_preview(self, client: httpx.AsyncClient, base_url: str,
+                              prompt: str, seed: int) -> str | None:
+        payload = {
+            "mode": "preview",
+            "prompt": prompt,
+            "art_style": "realistic",
+            "negative_prompt": "low quality, low poly, cartoon, text, watermark, ugly",
+            "ai_model": "meshy-6",
+            "seed": seed,
+        }
+        r = await self._request(client, "POST", f"{base_url}{_TEXT_TO_3D}", json=payload)
+        if r.status_code >= 400:
+            log.warning("meshy preview submit failed %d: %s", r.status_code, r.text[:200])
+            return None
+        return r.json().get("result")
+
+    async def _submit_refine(self, client: httpx.AsyncClient, base_url: str,
+                             preview_task_id: str) -> str | None:
+        payload = {
+            "mode": "refine",
+            "preview_task_id": preview_task_id,
+            "enable_pbr": True,
+        }
+        r = await self._request(client, "POST", f"{base_url}{_TEXT_TO_3D}", json=payload)
+        if r.status_code >= 400:
+            log.warning("meshy refine submit failed %d: %s", r.status_code, r.text[:200])
+            return None
+        return r.json().get("result")
+
+    async def _poll(self, client: httpx.AsyncClient, base_url: str,
+                    task_id: str, deadline_s: float = 600) -> dict | None:
+        end = time.monotonic() + deadline_s
+        while time.monotonic() < end:
+            await asyncio.sleep(3)
+            r = await self._request(client, "GET", f"{base_url}{_TEXT_TO_3D}/{task_id}")
+            if r.status_code >= 400:
+                log.warning("meshy poll failed: %s", r.text[:200])
+                return None
+            info = r.json()
+            status = info.get("status")
+            if status == "SUCCEEDED":
+                return info
+            if status in ("FAILED", "CANCELED", "EXPIRED"):
+                log.warning("meshy task %s ended in %s", task_id, status)
+                return None
+        log.warning("meshy task %s exceeded deadline", task_id)
+        return None
+
+    # ---- Public API ------------------------------------------------------
     async def generate(self, prompt: str, seed: int) -> Path | None:
-        """Return GLB path. Cached if available, else hits the Meshy API.
-        Returns None on failure so the caller can fall back."""
+        """End-to-end: preview → optional refine → cached GLB path."""
         if not self.cfg:
             return None
-        key = self.cache_key(prompt, seed)
+        key = self.cache_key(prompt, seed, self.texture)
         out = self.cached_glb(key)
         if out.exists() and out.stat().st_size > 0:
             return out
@@ -137,56 +221,40 @@ class MeshyEngine:
         api_key, base_url = self.cfg
         headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
         async with self._sem:
-            async with httpx.AsyncClient(timeout=240.0, headers=headers) as client:
-                # 1) Submit
-                payload = {
-                    "mode": "preview",
-                    "prompt": prompt,
-                    "art_style": "realistic",
-                    "negative_prompt": "low quality, low poly, cartoon, text, watermark, ugly",
-                    "ai_model": "meshy-6",
-                    "seed": seed,
-                }
-                try:
-                    r = await client.post(f"{base_url}{_TEXT_TO_3D}", json=payload)
-                    if r.status_code >= 400:
-                        log.warning("meshy submit failed %d: %s", r.status_code, r.text[:200])
+            try:
+                async with httpx.AsyncClient(timeout=240.0, headers=headers) as client:
+                    # 1) Preview
+                    preview_id = await self._submit_preview(client, base_url, prompt, seed)
+                    if not preview_id:
                         return None
-                    task_id = r.json().get("result")
-                    if not task_id:
+                    preview = await self._poll(client, base_url, preview_id)
+                    if not preview:
                         return None
 
-                    # 2) Poll for completion (preview-mode is usually 30-90s)
-                    deadline = time.monotonic() + 600
-                    while time.monotonic() < deadline:
-                        await asyncio.sleep(5)
-                        gr = await client.get(f"{base_url}{_TEXT_TO_3D}/{task_id}")
-                        if gr.status_code >= 400:
-                            log.warning("meshy poll failed: %s", gr.text[:200])
-                            return None
-                        info = gr.json()
-                        status = info.get("status")
-                        if status == "SUCCEEDED":
-                            glb_url = info.get("model_urls", {}).get("glb")
-                            if not glb_url:
-                                return None
-                            # 3) Download GLB
-                            dr = await client.get(glb_url)
-                            if dr.status_code >= 400:
-                                return None
-                            out.write_bytes(dr.content)
-                            return out
-                        if status in ("FAILED", "CANCELED", "EXPIRED"):
-                            log.warning("meshy task %s ended in %s", task_id, status)
-                            return None
-                except (httpx.HTTPError, json.JSONDecodeError) as exc:
-                    log.warning("meshy network error: %s", exc)
-                    return None
-        return None
+                    # 2) Refine (optional)
+                    final = preview
+                    if self.texture:
+                        refine_id = await self._submit_refine(client, base_url, preview_id)
+                        if refine_id:
+                            refined = await self._poll(client, base_url, refine_id)
+                            if refined:
+                                final = refined
+                            else:
+                                log.warning("meshy refine timed out for %s; using preview", preview_id)
+
+                    glb_url = (final.get("model_urls") or {}).get("glb")
+                    if not glb_url:
+                        return None
+                    dr = await self._request(client, "GET", glb_url)
+                    if dr.status_code >= 400:
+                        return None
+                    out.write_bytes(dr.content)
+                    return out
+            except (httpx.HTTPError, json.JSONDecodeError) as exc:
+                log.warning("meshy network error: %s", exc)
+                return None
 
 
-# ---------------------------------------------------------------------------
-# Convenience: build a prompt + run the engine for a single building request
 # ---------------------------------------------------------------------------
 async def generate_building_for(
     engine: MeshyEngine,
@@ -203,7 +271,6 @@ async def generate_building_for(
     if glb_path is None:
         return None
     rel = f"art/shapes/buildings_ai/meshy_{glb_path.stem}.glb"
-    # Heuristic natural size: assume Meshy returns a unit-ish mesh
     side = footprint_m2 ** 0.5
     return BuildingAsset(
         shape_relpath=rel,

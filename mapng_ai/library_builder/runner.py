@@ -114,7 +114,7 @@ async def _gen_one(entry: CatalogueEntry, engine: MeshyEngine, sem: asyncio.Sema
 async def build_library(
     *,
     categories: list[str] | None = None,
-    concurrency: int = 4,
+    concurrency: int | None = None,
     emit: Emit | None = None,
 ) -> LibraryProgress:
     engine = MeshyEngine(max_concurrency=concurrency)
@@ -132,10 +132,17 @@ async def build_library(
         total=len(entries), completed=0, skipped=0, failed=0, in_progress=[]
     )
     if emit:
-        await emit("batch:start", {"total": progress.total,
-                                   "categories": sorted({e.category for e in entries})})
+        await emit("batch:start", {
+            "total": progress.total,
+            "categories": sorted({e.category for e in entries}),
+            "concurrency": engine.concurrency,
+            "rps": engine.rps,
+            "texture": engine.texture,
+        })
 
-    sem = asyncio.Semaphore(concurrency)
+    # The engine already enforces its own semaphore + rate limiter, so we
+    # don't double-cap here.
+    sem = asyncio.Semaphore(engine.concurrency)
     await asyncio.gather(*[_gen_one(e, engine, sem, progress, emit) for e in entries])
 
     if emit:
