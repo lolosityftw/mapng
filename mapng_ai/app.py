@@ -95,6 +95,13 @@ async def index() -> HTMLResponse:
     return HTMLResponse(html, headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
+@app.get("/library")
+async def library_page() -> HTMLResponse:
+    html = (config.TEMPLATES_DIR / "library.html").read_text(encoding="utf-8")
+    html = html.replace("__BUILD__", BUILD_ID)
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache, must-revalidate"})
+
+
 @app.get("/api/health")
 async def health() -> dict:
     return {"ok": True, "version": app.version}
@@ -212,6 +219,119 @@ async def post_library_build(req: LibraryBuildRequest) -> dict:
 
     asyncio.create_task(_run())
     return {"job_id": job_id}
+
+
+class SingleBuildRequest(BaseModel):
+    slug: str
+    force: bool = False     # if True, regenerate even if cached
+
+
+@app.post("/api/library/build/single")
+async def build_single_entry(req: SingleBuildRequest) -> dict:
+    """Generate (or regenerate) one specific catalogue entry."""
+    from mapng_ai.assets.meshy import MeshyEngine
+    from mapng_ai.library_builder import CATALOGUE
+    from mapng_ai.library_builder.runner import target_glb, manifest_path, target_dir
+
+    entry = next((e for e in CATALOGUE if e.slug == req.slug), None)
+    if entry is None:
+        raise HTTPException(404, f"unknown slug: {req.slug}")
+
+    glb = target_glb(entry)
+    if req.force and glb.exists():
+        glb.unlink()
+
+    job_id = uuid.uuid4().hex[:12]
+    queue: asyncio.Queue[tuple[str, dict] | None] = asyncio.Queue()
+
+    class _LibJob:
+        def __init__(self):
+            self.queue = queue
+            self.done = False
+
+        async def emit(self, event: str, data: dict) -> None:
+            await self.queue.put((event, data))
+
+        async def close(self) -> None:
+            self.done = True
+            await self.queue.put(None)
+
+    job = _LibJob()
+    _library_jobs[job_id] = job
+
+    async def _run():
+        try:
+            from mapng_ai.library_builder.runner import _gen_one, LibraryProgress
+            engine = MeshyEngine()
+            if not engine.configured:
+                await job.emit("batch:error", {"message": "Meshy not configured"})
+                return
+            progress = LibraryProgress(total=1, completed=0, skipped=0, failed=0, in_progress=[])
+            await job.emit("batch:start", {
+                "total": 1, "categories": [entry.category],
+                "concurrency": engine.concurrency, "rps": engine.rps,
+                "texture": engine.texture,
+            })
+            sem = asyncio.Semaphore(1)
+            await _gen_one(entry, engine, sem, progress, job.emit)
+            await job.emit("batch:done", {
+                "total": 1, "completed": progress.completed,
+                "skipped": progress.skipped, "failed": progress.failed,
+            })
+        except Exception as exc:
+            await job.emit("batch:error", {"message": f"{type(exc).__name__}: {exc}"})
+        finally:
+            await job.close()
+
+    asyncio.create_task(_run())
+    return {"job_id": job_id}
+
+
+@app.delete("/api/library/entries/{slug}")
+async def delete_entry(slug: str) -> dict:
+    """Drop a cached GLB so the next build regenerates it."""
+    from mapng_ai.library_builder import CATALOGUE
+    from mapng_ai.library_builder.runner import target_glb, manifest_path
+
+    entry = next((e for e in CATALOGUE if e.slug == slug), None)
+    if entry is None:
+        raise HTTPException(404, f"unknown slug: {slug}")
+
+    glb = target_glb(entry)
+    deleted = False
+    if glb.exists():
+        glb.unlink()
+        deleted = True
+
+    # Update manifest.json
+    mp = manifest_path(entry)
+    if mp.exists():
+        try:
+            data = json.loads(mp.read_text(encoding="utf-8"))
+            data.pop(glb.name, None)
+            mp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        except Exception:
+            pass
+    return {"deleted": deleted, "slug": slug}
+
+
+@app.get("/api/library/entries/{slug}/glb")
+async def get_entry_glb(slug: str) -> FileResponse:
+    """Serve a cached GLB so the library page can preview it."""
+    from mapng_ai.library_builder import CATALOGUE
+    from mapng_ai.library_builder.runner import target_glb
+
+    entry = next((e for e in CATALOGUE if e.slug == slug), None)
+    if entry is None:
+        raise HTTPException(404, f"unknown slug: {slug}")
+    glb = target_glb(entry)
+    if not glb.exists():
+        raise HTTPException(404, f"{slug} not yet generated")
+    return FileResponse(
+        glb,
+        media_type="model/gltf-binary",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 @app.get("/api/library/jobs/{job_id}/events")

@@ -1,0 +1,135 @@
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: #1a1d23; color: #e6e8eb;
+}
+
+/* ---- Header ------------------------------------------------------------- */
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 20px; border-bottom: 1px solid #2a2f37; background: #14171c;
+}
+.header-left { display: flex; align-items: center; gap: 12px; }
+.header-right { display: flex; align-items: center; gap: 14px; }
+header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+.region-pill {
+  background: #1f2630; color: #58a6ff; font-size: 11px; font-weight: 600;
+  padding: 3px 10px; border-radius: 999px; border: 1px solid #2a3a4a;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.lib-status { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: #adbac7; }
+.ghost-link {
+  color: #adbac7; text-decoration: none; font-size: 13px;
+  padding: 6px 12px; border: 1px solid #2a2f37; border-radius: 4px;
+}
+.ghost-link:hover { background: #1f2630; color: #58a6ff; }
+
+/* ---- Filter / action bar ----------------------------------------------- */
+#bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 20px; background: #14171c; border-bottom: 1px solid #2a2f37;
+  gap: 16px; flex-wrap: wrap;
+}
+.filters { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.filters label {
+  display: flex; align-items: center; gap: 6px; font-size: 12px; color: #7d8590;
+}
+.filters select, .filters input {
+  background: #0d1117; color: #e6e8eb; border: 1px solid #2a2f37;
+  padding: 5px 8px; border-radius: 4px; font-size: 12px; min-width: 110px;
+}
+.filters input[type="search"] { min-width: 200px; }
+.actions { display: flex; gap: 10px; }
+
+/* ---- Buttons ------------------------------------------------------------ */
+button.primary, button.ghost, button.danger {
+  padding: 7px 14px; border-radius: 4px; font-size: 13px; font-weight: 600;
+  cursor: pointer; border: 0;
+}
+button.primary { background: #2ea043; color: #fff; }
+button.primary:not(:disabled):hover { background: #3fb950; }
+button.ghost {
+  background: transparent; color: #adbac7; border: 1px solid #2a2f37;
+}
+button.ghost:not(:disabled):hover { background: #1f2630; border-color: #3a4250; }
+button.danger { background: #5c2026; color: #f5b3b6; border: 1px solid #6e2730; }
+button.danger:not(:disabled):hover { background: #6e2730; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ---- Layout ------------------------------------------------------------- */
+main {
+  display: grid; grid-template-columns: minmax(420px, 1.2fr) 1fr;
+  height: calc(100vh - 105px); gap: 1px; background: #2a2f37;
+}
+main > section { background: #1a1d23; overflow: auto; }
+
+/* ---- List pane ---------------------------------------------------------- */
+.batch-status {
+  padding: 10px 20px; background: #14201a; color: #adbac7;
+  font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+  border-bottom: 1px solid #2a2f37;
+}
+.batch-status.error { background: #241a1a; color: #f5b3b6; }
+
+table#entries {
+  width: 100%; border-collapse: collapse; font-size: 13px;
+}
+table#entries th {
+  text-align: left; padding: 8px 14px; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.5px; color: #7d8590;
+  background: #14171c; position: sticky; top: 0; border-bottom: 1px solid #2a2f37;
+}
+table#entries td {
+  padding: 8px 14px; border-bottom: 1px solid #1c2129; vertical-align: middle;
+}
+table#entries tbody tr { cursor: pointer; }
+table#entries tbody tr:hover { background: #14181f; }
+table#entries tbody tr.selected { background: #1f2630; }
+
+.c-icon { width: 28px; text-align: center; }
+.c-icon span { font-family: ui-monospace, monospace; font-size: 14px; }
+tr.pending .c-icon span { color: #545c66; }
+tr.running .c-icon span { color: #d29922; animation: pulse 1.4s infinite; }
+tr.done    .c-icon span { color: #3fb950; }
+tr.skip    .c-icon span { color: #6e7681; }
+tr.fail    .c-icon span { color: #f85149; }
+
+.c-slug { font-weight: 500; }
+.c-slug .meta { display: block; font-size: 11px; color: #6e7681; font-weight: 400; margin-top: 2px;
+  font-family: ui-monospace, Consolas, monospace; max-width: 480px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.c-cat { color: #7d8590; font-size: 12px; }
+.c-cat .pill { background: #1f2630; padding: 2px 8px; border-radius: 999px; font-size: 10px; }
+.c-size { color: #6e7681; font-family: ui-monospace, Consolas, monospace; font-size: 11px; width: 80px; text-align: right; }
+.c-actions { width: 110px; }
+.c-actions button { padding: 4px 10px; font-size: 11px; font-weight: 500; }
+
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+/* ---- Detail pane -------------------------------------------------------- */
+.empty { padding: 60px 30px; text-align: center; color: #6e7681; font-size: 13px; }
+#detail { padding: 20px 24px; }
+#detail h2 { margin: 0 0 14px; font-size: 18px; color: #e6e8eb; font-weight: 600; }
+.meta-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px 18px;
+  background: #14171c; padding: 14px 16px; border-radius: 6px;
+  font-size: 12px; margin-bottom: 14px;
+}
+.meta-grid .full { grid-column: 1 / -1; }
+.meta-grid label {
+  display: block; font-size: 10px; color: #7d8590;
+  text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px;
+}
+.meta-grid span { color: #e6e8eb; font-family: ui-monospace, Consolas, monospace; }
+.meta-grid .full span { white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+
+.d-actions { display: flex; gap: 10px; margin-bottom: 18px; }
+
+.preview-wrap h3 { margin: 0 0 8px; font-size: 12px; font-weight: 600; color: #adbac7; text-transform: uppercase; letter-spacing: 0.5px; }
+#preview3d {
+  width: 100%; height: 380px; background: #0d1117;
+  border-radius: 6px; position: relative; overflow: hidden;
+}
+.preview-wrap .hint { color: #6e7681; font-size: 11px; margin-top: 6px; display: block; }

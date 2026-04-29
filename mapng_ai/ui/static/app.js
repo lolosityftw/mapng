@@ -2,14 +2,8 @@
    Map picker (Leaflet) + progress feed (SSE) + library batch panel.
    3D preview lives in preview.js as an ES module. */
 
-// ---- Library panel ----------------------------------------------------------
+// ---- Library status indicator (link to /library for management) -----------
 const libStatus = document.getElementById("lib-status");
-const libBuildBtn = document.getElementById("lib-build");
-const libPanel = document.getElementById("lib-panel");
-const libCloseBtn = document.getElementById("lib-close");
-const libList = document.getElementById("lib-list");
-const libSummary = document.getElementById("lib-summary");
-
 async function refreshLibStatus() {
   try {
     const r = await fetch("/api/library/status");
@@ -22,116 +16,6 @@ async function refreshLibStatus() {
   }
 }
 refreshLibStatus();
-
-let _libES = null;
-let _libBuilding = false;
-
-async function openLibPanel() {
-  libPanel.hidden = false;
-  libList.innerHTML = "";
-  libSummary.innerHTML = "loading catalogue…";
-
-  // Pre-populate the entire catalogue so the panel is never empty
-  try {
-    const r = await fetch("/api/library/catalogue");
-    if (!r.ok) throw new Error(`catalogue: ${r.status}`);
-    const { entries } = await r.json();
-    for (const e of entries) {
-      const li = document.createElement("li");
-      li.id = `lib-${e.slug}`;
-      const state = e.built ? "done" : "pending";
-      li.className = state;
-      li.innerHTML = `
-        <span class="icon">${e.built ? "✓" : "○"}</span>
-        <span class="label">${e.slug}<br><span class="meta">${e.category}/${e.type} · ${e.prompt.slice(0, 80)}…</span></span>
-        <span class="size">${e.built ? `${(e.size_bytes / 1e6).toFixed(1)} MB` : ""}</span>`;
-      libList.appendChild(li);
-    }
-    const built = entries.filter((e) => e.built).length;
-    libSummary.innerHTML = _libBuilding
-      ? `<strong>generating…</strong> ${built}/${entries.length} cached`
-      : `<strong>${built}/${entries.length}</strong> entries cached. Click <em>Start build</em> to generate the rest via Meshy (~30–90 s per entry, concurrency 10).`;
-    // Render an action bar
-    if (!document.getElementById("lib-action-bar")) {
-      const bar = document.createElement("div");
-      bar.id = "lib-action-bar";
-      bar.className = "lib-action-bar";
-      bar.innerHTML = `<button id="lib-start" class="primary">Start build</button>`;
-      libSummary.parentElement.insertBefore(bar, libSummary.nextSibling);
-      document.getElementById("lib-start").addEventListener("click", startLibBuild);
-    }
-  } catch (e) {
-    libSummary.innerHTML = `<span class="error">failed to load catalogue: ${e}</span>`;
-  }
-}
-
-function startLibBuild() {
-  if (_libBuilding) return;
-  _libBuilding = true;
-  const startBtn = document.getElementById("lib-start");
-  if (startBtn) startBtn.disabled = true;
-
-  fetch("/api/library/build", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({}),
-  }).then((r) => r.json()).then(({ job_id }) => {
-    if (_libES) _libES.close();
-    const es = new EventSource(`/api/library/jobs/${job_id}/events`);
-    _libES = es;
-    es.addEventListener("batch:start", (ev) => {
-      const d = JSON.parse(ev.data);
-      libSummary.innerHTML =
-        `<strong>building…</strong> 0 / ${d.total} done · concurrency ${d.concurrency} · ${d.rps} req/s · texture: ${d.texture ? "on" : "off"}`;
-    });
-    es.addEventListener("entry:start", (ev) => updateLibLine(JSON.parse(ev.data), "running"));
-    es.addEventListener("entry:done", (ev) => updateLibLine(JSON.parse(ev.data), "done"));
-    es.addEventListener("entry:skip", (ev) => updateLibLine(JSON.parse(ev.data), "skip"));
-    es.addEventListener("entry:fail", (ev) => updateLibLine(JSON.parse(ev.data), "fail"));
-    es.addEventListener("batch:done", (ev) => {
-      const d = JSON.parse(ev.data);
-      libSummary.innerHTML =
-        `<strong>done</strong> — ${d.completed} processed, ${d.skipped} skipped, ${d.failed} failed`;
-      _libBuilding = false;
-      if (startBtn) { startBtn.disabled = false; startBtn.textContent = "Re-run build"; }
-      refreshLibStatus();
-      es.close();
-    });
-    es.addEventListener("batch:error", (ev) => {
-      const d = JSON.parse(ev.data);
-      libSummary.innerHTML = `<span class="error">error: ${d.message}</span>`;
-      _libBuilding = false;
-      if (startBtn) startBtn.disabled = false;
-      es.close();
-    });
-  }).catch((e) => {
-    libSummary.innerHTML = `<span class="error">failed: ${e}</span>`;
-    _libBuilding = false;
-    if (startBtn) startBtn.disabled = false;
-  });
-}
-
-libBuildBtn?.addEventListener("click", openLibPanel);
-libCloseBtn?.addEventListener("click", () => { libPanel.hidden = true; });
-
-function updateLibLine(d, state) {
-  let li = document.getElementById(`lib-${d.slug}`);
-  if (!li) return;       // shouldn't happen — catalogue pre-populated everything
-  li.classList.remove("pending", "running", "done", "fail", "skip");
-  li.classList.add(state);
-  const icon = li.querySelector(".icon");
-  if (icon) icon.textContent =
-    state === "done"  ? "✓" :
-    state === "fail"  ? "✗" :
-    state === "skip"  ? "↻" :
-    state === "running" ? "…" : "○";
-  if (state === "done" && d.size_bytes) {
-    li.querySelector(".size").textContent = `${(d.size_bytes / 1e6).toFixed(1)} MB`;
-  }
-  if (state === "done" && d.completed && d.total) {
-    libSummary.innerHTML = `<strong>building…</strong> ${d.completed} / ${d.total} done`;
-  }
-}
 
 const COOKSTOWN = [54.6479, -6.7456]; // default centre
 

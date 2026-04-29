@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>MapNG-AI · Library</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="/static/library.css?v=__BUILD__" />
+</head>
+<body>
+
+<header>
+  <div class="header-left">
+    <h1>Region Pack Library</h1>
+    <span class="region-pill">Rural Ireland</span>
+  </div>
+  <div class="header-right">
+    <span class="lib-status" id="lib-status">…</span>
+    <a href="/" class="ghost-link">← Back to map</a>
+  </div>
+</header>
+
+<section id="bar">
+  <div class="filters">
+    <label>Category
+      <select id="f-category">
+        <option value="">all</option>
+        <option value="building">building</option>
+        <option value="tree">tree</option>
+        <option value="vehicle">vehicle</option>
+      </select>
+    </label>
+    <label>Type
+      <select id="f-type"><option value="">all</option></select>
+    </label>
+    <label>Status
+      <select id="f-built">
+        <option value="">all</option>
+        <option value="built">built</option>
+        <option value="missing">missing</option>
+      </select>
+    </label>
+    <label>Sort
+      <select id="f-sort">
+        <option value="natural">catalogue order</option>
+        <option value="name">name</option>
+        <option value="type">type</option>
+        <option value="size">size</option>
+        <option value="status">status</option>
+      </select>
+    </label>
+    <input id="f-search" type="search" placeholder="search prompts…" />
+  </div>
+  <div class="actions">
+    <button id="build-missing" class="primary">Build missing</button>
+    <button id="build-all" class="ghost">Re-build all</button>
+  </div>
+</section>
+
+<main>
+  <section id="list-pane">
+    <div id="batch-status" class="batch-status" hidden></div>
+    <table id="entries">
+      <thead>
+        <tr>
+          <th class="c-icon"></th>
+          <th class="c-slug">Asset</th>
+          <th class="c-cat">Cat / Type</th>
+          <th class="c-size">Size</th>
+          <th class="c-actions"></th>
+        </tr>
+      </thead>
+      <tbody id="entries-body"></tbody>
+    </table>
+  </section>
+
+  <section id="detail-pane">
+    <div id="detail-empty" class="empty">Select a row to preview the mesh.</div>
+    <div id="detail" hidden>
+      <h2 id="d-slug"></h2>
+      <div class="meta-grid">
+        <div><label>Category</label><span id="d-category"></span></div>
+        <div><label>Type</label><span id="d-type"></span></div>
+        <div><label>Footprint</label><span id="d-footprint"></span></div>
+        <div><label>Levels</label><span id="d-levels"></span></div>
+        <div class="full"><label>Prompt</label><span id="d-prompt"></span></div>
+        <div><label>File</label><span id="d-size"></span></div>
+        <div><label>Status</label><span id="d-status"></span></div>
+      </div>
+      <div class="d-actions">
+        <button id="d-generate" class="primary">Generate</button>
+        <button id="d-regenerate" class="ghost">Regenerate</button>
+        <button id="d-delete" class="danger">Delete cache</button>
+      </div>
+      <div class="preview-wrap">
+        <h3>3D preview</h3>
+        <div id="preview3d"></div>
+        <small class="hint">Drag to orbit · scroll to zoom · the mesh scale shown matches its catalogue footprint.</small>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script type="importmap">
+{ "imports": {
+  "three":         "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+<script type="module" src="/static/library.js?v=__BUILD__"></script>
+</body>
+</html>
