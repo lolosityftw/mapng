@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from mapng_ai import config
+from mapng_ai.pipeline.beamng_level import LevelPackage, write_level_package
 from mapng_ai.pipeline.heightmap import HeightmapResult, build_heightmap
 from mapng_ai.pipeline.region import Region, resolve_region
 from mapng_ai.sources.base import BBoxLL, ElevationSource, ElevationTile
@@ -28,6 +29,7 @@ class JobContext:
     elevation_source: ElevationSource | None = None
     elevation_tile: ElevationTile | None = None
     heightmap: HeightmapResult | None = None
+    level_package: LevelPackage | None = None
 
     artifacts: dict[str, str] = field(default_factory=dict)
     """Public URLs of artefacts the UI can fetch (heightmap preview, etc.)."""
@@ -83,6 +85,27 @@ async def stage_heightmap(ctx: JobContext, emit: Emit) -> None:
     })
 
 
+async def stage_export(ctx: JobContext, emit: Emit) -> None:
+    assert ctx.heightmap and ctx.region
+    level_name = f"mapng_{ctx.job_id}"
+    pkg = await asyncio.to_thread(
+        write_level_package,
+        level_name=level_name,
+        heightmap_m=ctx.heightmap.elevations_m,
+        side_m=ctx.region.side_m,
+        out_dir=ctx.out_dir,
+    )
+    ctx.level_package = pkg
+    ctx.artifacts["level_zip"] = f"/api/jobs/{ctx.job_id}/files/{pkg.zip_path.name}"
+    await emit("stage:info", {
+        "key": "export",
+        "level_name": level_name,
+        "zip_url": ctx.artifacts["level_zip"],
+        "zip_bytes": pkg.zip_path.stat().st_size,
+        "spawn_xyz": list(pkg.spawn_xyz),
+    })
+
+
 # ---------------------------------------------------------------------------
 # Stub stages (replaced phase-by-phase)
 # ---------------------------------------------------------------------------
@@ -112,7 +135,7 @@ STAGES: tuple[Stage, ...] = (
     Stage("segment",   "Land-cover segmentation",       None),  # filled at runtime
     Stage("splat",     "Material splatting",            None),
     Stage("place",     "Object placement",              None),
-    Stage("export",    "BeamNG export",                 None),
+    Stage("export",    "BeamNG export",                 stage_export),
 )
 
 

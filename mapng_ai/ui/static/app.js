@@ -108,6 +108,29 @@ function setStageProgress(key, fraction) {
   if (bar) bar.style.width = `${(fraction * 100).toFixed(0)}%`;
 }
 
+function addDownload(url, label, meta) {
+  const wrap = document.getElementById("downloads");
+  const list = document.getElementById("download-list");
+  wrap.hidden = false;
+  const li = document.createElement("li");
+  const a = document.createElement("a");
+  a.href = url; a.textContent = label; a.download = label;
+  li.appendChild(a);
+  if (meta) {
+    const span = document.createElement("span");
+    span.className = "meta"; span.textContent = meta;
+    li.appendChild(span);
+  }
+  list.appendChild(li);
+}
+
+function formatBytes(n) {
+  if (!n) return "";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
 // ---- Generate flow ----
 generateBtn.addEventListener("click", async () => {
   if (!currentBBox) return;
@@ -115,6 +138,8 @@ generateBtn.addEventListener("click", async () => {
   statusEl.className = "status running";
   statusEl.textContent = "starting…";
   stagesEl.innerHTML = "";
+  document.getElementById("downloads").hidden = true;
+  document.getElementById("download-list").innerHTML = "";
 
   const res = await fetch("/api/generate", {
     method: "POST",
@@ -154,6 +179,9 @@ generateBtn.addEventListener("click", async () => {
         minM: data.min_m,
         maxM: data.max_m,
       }).catch((e) => console.error("[preview]", e));
+    }
+    if (data.key === "export" && data.zip_url) {
+      addDownload(data.zip_url, `${data.level_name}.zip`, formatBytes(data.zip_bytes));
     }
   });
   es.addEventListener("stage:done", (ev) => {
