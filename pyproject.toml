@@ -12,25 +12,14 @@ dependencies = [
     "pydantic>=2.9",
     "python-multipart>=0.0.20",
     "sse-starlette>=2.1",
-]
-
-[project.optional-dependencies]
-geo = [
+    "numpy>=2.0",
+    "pillow>=11.0",
     "rasterio>=1.4",
     "shapely>=2.0",
     "pyproj>=3.6",
-    "geopandas>=1.0",
     "mercantile>=1.2",
-    "numpy>=2.0",
-    "pillow>=11.0",
-]
-ai = [
-    "torch>=2.4",
-    "onnxruntime-gpu>=1.20",
-]
-mesh = [
     "trimesh>=4.5",
-    "pygltflib>=1.16",
+    "scipy>=1.13",
 ]
 
 [tool.uv]

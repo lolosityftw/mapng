@@ -145,10 +145,27 @@ generateBtn.addEventListener("click", async () => {
     const { key, fraction } = JSON.parse(ev.data);
     setStageProgress(key, fraction);
   });
+  es.addEventListener("stage:info", (ev) => {
+    const data = JSON.parse(ev.data);
+    if (data.key === "heightmap" && data.preview_url) {
+      window.MapNGPreview?.setHeightmap?.({
+        url: data.preview_url,
+        sideMeters: data.side_m,
+        minM: data.min_m,
+        maxM: data.max_m,
+      }).catch((e) => console.error("[preview]", e));
+    }
+  });
   es.addEventListener("stage:done", (ev) => {
     const { key } = JSON.parse(ev.data);
     setStageState(key, "done");
     setStageProgress(key, 1);
+  });
+  es.addEventListener("stage:error", (ev) => {
+    const { key, message } = JSON.parse(ev.data);
+    setStageState(key, "error");
+    statusEl.className = "status error";
+    statusEl.textContent = `error in ${key}: ${message}`;
   });
   es.addEventListener("pipeline:done", () => {
     statusEl.className = "status done";

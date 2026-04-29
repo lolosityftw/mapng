@@ -1,4 +1,4 @@
-"""FastAPI entry point — Phase 0 skeleton."""
+"""FastAPI entry point."""
 from __future__ import annotations
 
 import asyncio
@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from mapng_ai import config
-from mapng_ai.pipeline import BBox, run_pipeline
+from mapng_ai.pipeline import BBox, JobContext, run_pipeline
 
 
 config.ensure_runtime_dirs()
@@ -26,10 +26,9 @@ app.mount("/static", StaticFiles(directory=str(config.STATIC_DIR)), name="static
 # ---------------------------------------------------------------------------
 # In-memory job registry
 # ---------------------------------------------------------------------------
-class _JobChannel:
-    """Single-consumer event channel for one pipeline run."""
-
-    def __init__(self) -> None:
+class _Job:
+    def __init__(self, ctx: JobContext) -> None:
+        self.ctx = ctx
         self.queue: asyncio.Queue[tuple[str, dict] | None] = asyncio.Queue()
         self.done = False
 
@@ -41,7 +40,7 @@ class _JobChannel:
         await self.queue.put(None)
 
 
-_jobs: dict[str, _JobChannel] = {}
+_jobs: dict[str, _Job] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -77,38 +76,56 @@ async def generate(req: GenerateRequest) -> GenerateResponse:
         raise HTTPException(400, "Invalid bbox: east must be > west, north must be > south")
 
     job_id = uuid.uuid4().hex[:12]
-    channel = _JobChannel()
-    _jobs[job_id] = channel
-
-    bbox = BBox(req.west, req.south, req.east, req.north)
-    asyncio.create_task(_run_job(channel, bbox))
+    out_dir = config.OUTPUT_DIR / job_id
+    ctx = JobContext(
+        job_id=job_id,
+        bbox_ll=BBox(req.west, req.south, req.east, req.north),
+        out_dir=out_dir,
+    )
+    job = _Job(ctx)
+    _jobs[job_id] = job
+    asyncio.create_task(_run_job(job))
     return GenerateResponse(job_id=job_id)
 
 
-async def _run_job(channel: _JobChannel, bbox: BBox) -> None:
+async def _run_job(job: _Job) -> None:
     try:
-        await run_pipeline(bbox, channel.emit)
-    except Exception as exc:  # pragma: no cover  (defensive — real errors come later)
-        await channel.emit("pipeline:error", {"message": str(exc)})
+        await run_pipeline(job.ctx, job.emit)
+    except Exception as exc:
+        await job.emit("pipeline:error", {"message": f"{type(exc).__name__}: {exc}"})
     finally:
-        await channel.close()
+        await job.close()
 
 
 @app.get("/api/jobs/{job_id}/events")
 async def stream_events(job_id: str) -> EventSourceResponse:
-    channel = _jobs.get(job_id)
-    if channel is None:
+    job = _jobs.get(job_id)
+    if job is None:
         raise HTTPException(404, "Unknown job_id")
 
     async def event_gen() -> AsyncIterator[dict]:
         while True:
-            item = await channel.queue.get()
+            item = await job.queue.get()
             if item is None:
                 break
             event, data = item
             yield {"event": event, "data": json.dumps(data)}
 
     return EventSourceResponse(event_gen())
+
+
+@app.get("/api/jobs/{job_id}/files/{path:path}")
+async def get_artifact(job_id: str, path: str) -> FileResponse:
+    """Serve a generated artefact (heightmap PNG, GeoTIFF, level zip, …)."""
+    if ".." in path or path.startswith(("/", "\\")):
+        raise HTTPException(400, "Invalid path")
+    job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "Unknown job_id")
+    full = (job.ctx.out_dir / path).resolve()
+    if not str(full).startswith(str(job.ctx.out_dir.resolve())) or not full.exists():
+        raise HTTPException(404, "Artifact not found")
+    return FileResponse(full)
 
 
 # ---------------------------------------------------------------------------
