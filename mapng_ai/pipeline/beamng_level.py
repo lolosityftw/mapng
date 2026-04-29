@@ -105,14 +105,25 @@ def _terrain_materials_json(level_name: str, size_m: float,
     out: dict = {}
     for layer in splat.layers:
         key = layer.cls.key
-        out[f"mat_{key}"] = {
+        # Pick the file extension that matches the source on disk so the
+        # in-zip path is consistent with what we bundle.
+        diffuse_ext = layer.diffuse_path.suffix.lower()
+        material = {
             "class":        "TerrainMaterial",
             "internalName": f"mat_{key}",
-            "diffuseMap":   f"levels/{level_name}/art/terrains/diffuse_{key}.png",
+            "diffuseMap":   f"levels/{level_name}/art/terrains/diffuse_{key}{diffuse_ext}",
             "diffuseSize":  4,
             "blendMap":     f"levels/{level_name}/art/terrains/opacity_{key}.png",
             "groundmodelName": _GROUNDMODELS.get(key, "GROUNDMODEL_GRASS"),
         }
+        if layer.normal_path is not None:
+            ne = layer.normal_path.suffix.lower()
+            material["normalMap"] = f"levels/{level_name}/art/terrains/normal_{key}{ne}"
+        if layer.roughness_path is not None:
+            re_ = layer.roughness_path.suffix.lower()
+            material["specularMap"] = f"levels/{level_name}/art/terrains/rough_{key}{re_}"
+            material["specularPower"] = 16
+        out[f"mat_{key}"] = material
     return out
 
 
@@ -422,13 +433,25 @@ def write_level_package(
     w(f"{base}/art/terrains/main.materials.json",
       json.dumps(_terrain_materials_json(level_name, side_m, splat), indent=2))
 
-    # Per-class diffuse + opacity layers (Phase 4)
+    # Per-class PBR tiles (diffuse + optional normal + optional roughness)
+    # plus the splat opacity mask. Diffuse may be JPG (Poly Haven) or PNG
+    # (procedural fallback) — mirror its real extension into the zip.
     if splat is not None:
         for layer in splat.layers:
-            w(f"{base}/art/terrains/diffuse_{layer.cls.key}.png",
+            key = layer.cls.key
+            de = layer.diffuse_path.suffix.lower()
+            w(f"{base}/art/terrains/diffuse_{key}{de}",
               layer.diffuse_path.read_bytes())
-            w(f"{base}/art/terrains/opacity_{layer.cls.key}.png",
+            w(f"{base}/art/terrains/opacity_{key}.png",
               layer.opacity_path.read_bytes())
+            if layer.normal_path is not None:
+                ne = layer.normal_path.suffix.lower()
+                w(f"{base}/art/terrains/normal_{key}{ne}",
+                  layer.normal_path.read_bytes())
+            if layer.roughness_path is not None:
+                re_ = layer.roughness_path.suffix.lower()
+                w(f"{base}/art/terrains/rough_{key}{re_}",
+                  layer.roughness_path.read_bytes())
     # The base diffuse: real satellite imagery if available, else procedural blend
     if terrain_png_bytes is not None:
         w(f"{base}/art/terrains/terrain.png", terrain_png_bytes)

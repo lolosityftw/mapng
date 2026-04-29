@@ -1,9 +1,13 @@
-"""Procedural per-class ground textures.
+"""Per-class ground textures.
 
-Goal: stop shipping flat colour swatches as the diffuse maps. The full PBR
-upgrade will plug in real CC0 textures from Poly Haven (Phase 4 polish), but
-in the meantime we generate plausible 2048² diffuse + roughness + normal
-images deterministically. Cached on disk so re-runs are instant.
+Two layers:
+  1. Real CC0 PBR tiles downloaded from Poly Haven (preferred). Bring them
+     in via `python -m mapng_ai.library_builder.terrain_pack` or the UI button.
+  2. Procedural FBM-noise tiles (fallback) — used per class when the real
+     PBR set isn't on disk yet.
+
+Both produce the same `GroundTexture(diffuse_path, normal_path?, roughness_path?)`
+shape so the splatting pipeline doesn't care which came back.
 """
 from __future__ import annotations
 
@@ -122,10 +126,30 @@ _RECIPES = {
 class GroundTexture:
     key: str
     diffuse_path: Path
+    normal_path: Path | None = None
+    roughness_path: Path | None = None
+    source: str = "procedural"      # "polyhaven" or "procedural"
 
 
 def get_ground_texture(class_key: str) -> GroundTexture:
-    """Return a cached PBR-ish diffuse texture for the named class."""
+    """Return a PBR set for this class — real tiles from Poly Haven if cached,
+    otherwise a procedural diffuse-only fallback."""
+    # Prefer real PBR if downloaded
+    try:
+        from mapng_ai.library_builder.terrain_pack import pbr_set
+        s = pbr_set(class_key)
+        if s.diffuse is not None:
+            return GroundTexture(
+                key=class_key,
+                diffuse_path=s.diffuse,
+                normal_path=s.normal,
+                roughness_path=s.roughness,
+                source="polyhaven",
+            )
+    except Exception:
+        pass
+
+    # Fallback: procedural tile
     cache_dir = config.CACHE_DIR / "textures"
     cache_dir.mkdir(parents=True, exist_ok=True)
     diffuse_path = cache_dir / f"{class_key}_diffuse.png"

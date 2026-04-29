@@ -35,9 +35,12 @@ _NOISE_AMPLITUDE = 0.18  # ±18% of the layer's opacity
 @dataclass(frozen=True)
 class SplatLayer:
     cls: LandClass
-    opacity_path: Path           # 8-bit PNG, single channel
-    diffuse_path: Path           # solid-colour 256×256 PNG used as that layer's diffuse
-    coverage_pct: float
+    opacity_path: Path                  # 8-bit PNG, single channel
+    diffuse_path: Path                  # diffuse tile (Poly Haven if present, else procedural)
+    normal_path: Path | None = None     # only set when Poly Haven PBR is available
+    roughness_path: Path | None = None
+    source: str = "procedural"          # "polyhaven" or "procedural"
+    coverage_pct: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -95,16 +98,22 @@ def build_splat(class_map: np.ndarray, out_dir: Path, *, seed: int = 1) -> Splat
         opacity_path = out_dir / f"opacity_{cls.key}.png"
         Image.fromarray(opacity_8, mode="L").save(opacity_path)
 
-        # Procedural PBR-ish diffuse — cached cross-job in textures.py
-        diffuse_path = get_ground_texture(cls.key).diffuse_path
+        # PBR tile — prefers real Poly Haven texture, falls back to procedural
+        gt = get_ground_texture(cls.key)
+        diffuse_path = gt.diffuse_path
 
         # Accumulate the combined preview
         combined += layer[..., None] * np.array(cls.color_rgb, dtype=np.float32)
 
         coverage = float((layer > 0.05).mean()) * 100
         layers.append(SplatLayer(
-            cls=cls, opacity_path=opacity_path,
-            diffuse_path=diffuse_path, coverage_pct=coverage,
+            cls=cls,
+            opacity_path=opacity_path,
+            diffuse_path=diffuse_path,
+            normal_path=gt.normal_path,
+            roughness_path=gt.roughness_path,
+            source=gt.source,
+            coverage_pct=coverage,
         ))
 
     combined_8 = combined.clip(0, 255).astype(np.uint8)

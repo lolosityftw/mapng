@@ -29,6 +29,7 @@ const els = {
   fSearch: document.getElementById("f-search"),
   buildMissing: document.getElementById("build-missing"),
   buildAll: document.getElementById("build-all"),
+  terrainPack: document.getElementById("terrain-pack"),
   body: document.getElementById("entries-body"),
   batchStatus: document.getElementById("batch-status"),
   detailEmpty: document.getElementById("detail-empty"),
@@ -427,6 +428,66 @@ els.buildAll.addEventListener("click", () => {
     buildBatch(true);
   }
 });
+
+// ---- Terrain PBR pack download (Poly Haven CC0) -----------------------------
+async function downloadTerrainPack() {
+  els.terrainPack.disabled = true;
+  els.batchStatus.hidden = false;
+  els.batchStatus.classList.remove("error");
+  els.batchStatus.textContent = "starting Poly Haven downloads…";
+
+  try {
+    const r = await fetch("/api/library/terrain-pack/download", { method: "POST" });
+    if (!r.ok) throw new Error(`download: ${r.status}`);
+    const { job_id } = await r.json();
+    if (state.liveJob) state.liveJob.close();
+    const es = new EventSource(`/api/library/jobs/${job_id}/events`);
+    state.liveJob = es;
+
+    es.addEventListener("pack:start", (ev) => {
+      const d = JSON.parse(ev.data);
+      els.batchStatus.textContent = `terrain pack: 0 / ${d.total} classes`;
+    });
+    let completed = 0, total = 0;
+    es.addEventListener("class:done", (ev) => {
+      const d = JSON.parse(ev.data); completed++;
+      els.batchStatus.textContent =
+        `terrain pack: ${completed} / ${total || "?"} · last: ${d.class} (${d.downloaded}/${d.attempted} maps)`;
+    });
+    es.addEventListener("class:skip", (ev) => {
+      const d = JSON.parse(ev.data); completed++;
+      els.batchStatus.textContent = `terrain pack: ${completed} cached · ${d.class} skipped`;
+    });
+    es.addEventListener("class:fail", (ev) => {
+      const d = JSON.parse(ev.data);
+      els.batchStatus.textContent =
+        `terrain pack: ${d.class} failed (${d.reason}) — falling back to procedural`;
+    });
+    es.addEventListener("pack:start", (ev) => { total = JSON.parse(ev.data).total; });
+    es.addEventListener("pack:done", (ev) => {
+      const d = JSON.parse(ev.data);
+      els.batchStatus.textContent =
+        `terrain pack: done — ${d.completed} processed, ${d.skipped} cached, ${d.failed} failed`;
+      state.liveJob = null;
+      es.close();
+      els.terrainPack.disabled = false;
+      setTimeout(() => { els.batchStatus.hidden = true; }, 5000);
+    });
+    es.addEventListener("pack:error", (ev) => {
+      const d = JSON.parse(ev.data);
+      els.batchStatus.classList.add("error");
+      els.batchStatus.textContent = `error: ${d.message}`;
+      els.terrainPack.disabled = false;
+      es.close();
+    });
+  } catch (e) {
+    els.batchStatus.classList.add("error");
+    els.batchStatus.textContent = `failed: ${e}`;
+    els.terrainPack.disabled = false;
+  }
+}
+
+els.terrainPack.addEventListener("click", downloadTerrainPack);
 
 els.d.generate.addEventListener("click", () => buildOne(state.selectedSlug, false));
 els.d.regenerate.addEventListener("click", () => {

@@ -334,6 +334,48 @@ async def get_entry_glb(slug: str) -> FileResponse:
     )
 
 
+# ---- Terrain PBR pack -------------------------------------------------------
+@app.get("/api/library/terrain-pack/status")
+async def get_terrain_pack_status() -> dict:
+    from mapng_ai.library_builder.terrain_pack import pack_status
+    return pack_status()
+
+
+@app.post("/api/library/terrain-pack/download")
+async def post_terrain_pack_download() -> dict:
+    """Kick a Poly Haven download for all 8 land cover classes."""
+    from mapng_ai.library_builder.terrain_pack import download_terrain_pack
+
+    job_id = uuid.uuid4().hex[:12]
+    queue: asyncio.Queue[tuple[str, dict] | None] = asyncio.Queue()
+
+    class _LibJob:
+        def __init__(self):
+            self.queue = queue
+            self.done = False
+
+        async def emit(self, event: str, data: dict) -> None:
+            await self.queue.put((event, data))
+
+        async def close(self) -> None:
+            self.done = True
+            await self.queue.put(None)
+
+    job = _LibJob()
+    _library_jobs[job_id] = job
+
+    async def _run():
+        try:
+            await download_terrain_pack(emit=job.emit)
+        except Exception as exc:
+            await job.emit("pack:error", {"message": f"{type(exc).__name__}: {exc}"})
+        finally:
+            await job.close()
+
+    asyncio.create_task(_run())
+    return {"job_id": job_id}
+
+
 @app.get("/api/library/jobs/{job_id}/events")
 async def stream_library_events(job_id: str) -> EventSourceResponse:
     job = _library_jobs.get(job_id)
