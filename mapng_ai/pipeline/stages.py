@@ -11,11 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-import os
-
 from mapng_ai import config
 from mapng_ai.assets.chain import ProviderChain
-from mapng_ai.assets.meshy import MeshyEngine, generate_building_for, _prompt_for_building
 from mapng_ai.pipeline.beamng_level import LevelPackage, write_level_package
 from mapng_ai.pipeline.classmap import build_class_map
 from mapng_ai.pipeline.decal_roads import DecalRoad, extract_decal_roads
@@ -207,61 +204,6 @@ async def stage_place(ctx: JobContext, emit: Emit) -> None:
     )
     ctx.foliage = await asyncio.to_thread(place_foliage, ctx.osm, ctx.region, hm)
     ctx.decal_roads = await asyncio.to_thread(extract_decal_roads, ctx.osm, ctx.region, hm)
-
-    # Optional: upgrade the largest N buildings via Meshy (if configured).
-    # Slow: ~30-90 s per building, capped to keep generation reasonable.
-    meshy = MeshyEngine()
-    if meshy.configured and ctx.buildings:
-        max_n = int(os.environ.get("MAPNG_MESHY_MAX_BUILDINGS", "12"))
-        min_area = float(os.environ.get("MAPNG_MESHY_MIN_AREA_M2", "80"))
-        candidates = sorted(
-            (b for b in ctx.buildings
-             if (b.scale_xyz[0] * b.scale_xyz[1]) >= min_area),
-            key=lambda b: -(b.scale_xyz[0] * b.scale_xyz[1]),
-        )[:max_n]
-        await emit("stage:info", {
-            "key": "place", "phase": "meshy_start",
-            "count": len(candidates),
-            "msg": f"Meshy: generating {len(candidates)} AI buildings (slow)",
-        })
-
-        async def _gen_one(b):
-            footprint = b.scale_xyz[0] * b.scale_xyz[1]
-            levels = max(1, int(round(b.scale_xyz[2] / 3.0)))
-            asset = await generate_building_for(
-                meshy,
-                footprint_m2=footprint, levels=levels,
-                building_type=b.asset.type_label, seed=b.osm_id,
-            )
-            return b, asset
-
-        results = await asyncio.gather(*[_gen_one(b) for b in candidates],
-                                       return_exceptions=True)
-        upgraded = 0
-        # Replace BuildingPlacement entries' assets in-place
-        replaced_by_id: dict[int, "BuildingAsset"] = {}
-        for r in results:
-            if isinstance(r, Exception) or r is None:
-                continue
-            b, asset = r
-            if asset is not None:
-                replaced_by_id[b.osm_id] = asset
-                upgraded += 1
-        if replaced_by_id:
-            from mapng_ai.pipeline.placement import BuildingPlacement as _BP
-            ctx.buildings = [
-                _BP(
-                    osm_id=b.osm_id,
-                    asset=replaced_by_id.get(b.osm_id, b.asset),
-                    x_m=b.x_m, y_m=b.y_m, z_m=b.z_m,
-                    yaw_rad=b.yaw_rad, scale_xyz=b.scale_xyz,
-                )
-                for b in ctx.buildings
-            ]
-        await emit("stage:info", {
-            "key": "place", "phase": "meshy_done",
-            "upgraded": upgraded, "attempted": len(candidates),
-        })
 
     # Three.js preview payload
     buildings_payload = [

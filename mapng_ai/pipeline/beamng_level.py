@@ -145,7 +145,7 @@ def _tree_tsstatics(level_name: str, trees: Sequence[TreePlacement]) -> list[dic
         out.append({
             "class": "TSStatic",
             "name": f"tree_{i}",
-            "shapeName": f"/levels/{level_name}/art/shapes/foliage/tree.dae",
+            "shapeName": f"/levels/{level_name}/{t.shape_relpath}",
             "position": [t.x, t.y, t.z],
             "rotationMatrix": _yaw_rotation_matrix(t.yaw),
             "scale": [sx, sy, sz],
@@ -462,11 +462,28 @@ def write_level_package(
             w(f"{base}/{rel if rel.endswith('.dae') else fallback_rel}",
               cache_path.read_bytes())
 
-    # Foliage shapes (single tree DAE + single hedge DAE, used by all instances)
+    # Foliage shapes — bundle every unique tree shape used + the placeholder DAE
+    # if any tree falls back to it. Library trees live in assets/trees/<species>/.
     if foliage and (foliage.trees or foliage.hedges):
+        from mapng_ai.assets.library import tree_library
+        seen_tree_shapes: set[str] = set()
         if foliage.trees:
-            tree_path, _ = write_tree_dae()
-            w(f"{base}/art/shapes/foliage/tree.dae", tree_path.read_bytes())
+            tree_lib = tree_library()
+            # Map rel_path → fs_path for fast lookup
+            lib_lookup: dict[str, Path] = {}
+            for entries in tree_lib.values():
+                for e in entries:
+                    lib_lookup[e.rel_path] = e.fs_path
+            for t in foliage.trees:
+                rel = t.shape_relpath
+                if rel in seen_tree_shapes:
+                    continue
+                seen_tree_shapes.add(rel)
+                if rel in lib_lookup:
+                    w(f"{base}/{rel}", lib_lookup[rel].read_bytes())
+                else:
+                    placeholder_path, _ = write_tree_dae()
+                    w(f"{base}/{rel}", placeholder_path.read_bytes())
         if foliage.hedges:
             hedge_path, _ = write_hedge_dae()
             w(f"{base}/art/shapes/foliage/hedge.dae", hedge_path.read_bytes())

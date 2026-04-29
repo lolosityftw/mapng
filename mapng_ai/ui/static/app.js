@@ -1,6 +1,94 @@
-/* MapNG-AI — Phase 0 frontend
-   Map picker (Leaflet) + progress feed (SSE).
+/* MapNG-AI frontend
+   Map picker (Leaflet) + progress feed (SSE) + library batch panel.
    3D preview lives in preview.js as an ES module. */
+
+// ---- Library panel ----------------------------------------------------------
+const libStatus = document.getElementById("lib-status");
+const libBuildBtn = document.getElementById("lib-build");
+const libPanel = document.getElementById("lib-panel");
+const libCloseBtn = document.getElementById("lib-close");
+const libList = document.getElementById("lib-list");
+const libSummary = document.getElementById("lib-summary");
+
+async function refreshLibStatus() {
+  try {
+    const r = await fetch("/api/library/status");
+    if (!r.ok) throw new Error(r.statusText);
+    const s = await r.json();
+    const built = (s.totals.building || 0) + (s.totals.tree || 0) + (s.totals.vehicle || 0);
+    libStatus.textContent = `library: ${built}/${s.catalogue_size} built`;
+  } catch (e) {
+    libStatus.textContent = "library: ?";
+  }
+}
+refreshLibStatus();
+
+libBuildBtn?.addEventListener("click", () => {
+  libPanel.hidden = false;
+  libList.innerHTML = "";
+  libSummary.textContent =
+    "Generating region pack via Meshy. Each entry takes 30–90 s. Cached results skip; safe to re-run.";
+  fetch("/api/library/build", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  }).then((r) => r.json()).then(({ job_id }) => {
+    const es = new EventSource(`/api/library/jobs/${job_id}/events`);
+    es.addEventListener("batch:start", (ev) => {
+      const d = JSON.parse(ev.data);
+      libSummary.textContent = `0 / ${d.total} entries (categories: ${d.categories.join(", ")})`;
+    });
+    es.addEventListener("entry:start", (ev) => addLibLine(JSON.parse(ev.data), "running"));
+    es.addEventListener("entry:done", (ev) => updateLibLine(JSON.parse(ev.data), "done"));
+    es.addEventListener("entry:skip", (ev) => addLibLine(JSON.parse(ev.data), "skip"));
+    es.addEventListener("entry:fail", (ev) => updateLibLine(JSON.parse(ev.data), "fail"));
+    es.addEventListener("batch:done", (ev) => {
+      const d = JSON.parse(ev.data);
+      libSummary.textContent = `done — ${d.completed} processed, ${d.skipped} skipped, ${d.failed} failed`;
+      refreshLibStatus();
+      es.close();
+    });
+    es.addEventListener("batch:error", (ev) => {
+      const d = JSON.parse(ev.data);
+      libSummary.textContent = `error: ${d.message}`;
+      es.close();
+    });
+  });
+});
+
+libCloseBtn?.addEventListener("click", () => { libPanel.hidden = true; });
+
+function addLibLine(d, state) {
+  let li = document.getElementById(`lib-${d.slug}`);
+  if (!li) {
+    li = document.createElement("li");
+    li.id = `lib-${d.slug}`;
+    li.innerHTML = `
+      <span class="icon">${state === "skip" ? "↻" : "…"}</span>
+      <span class="label">${d.slug}<br><span class="meta">${d.category || ""}/${d.type || ""}</span></span>
+      <span class="size"></span>`;
+    libList.appendChild(li);
+  }
+  li.classList.add(state);
+}
+
+function updateLibLine(d, state) {
+  let li = document.getElementById(`lib-${d.slug}`);
+  if (!li) {
+    addLibLine(d, state);
+    li = document.getElementById(`lib-${d.slug}`);
+  }
+  li.classList.remove("running", "done", "fail", "skip");
+  li.classList.add(state);
+  const icon = li.querySelector(".icon");
+  if (icon) icon.textContent = state === "done" ? "✓" : state === "fail" ? "✗" : state === "skip" ? "↻" : "…";
+  if (state === "done" && d.size_bytes) {
+    li.querySelector(".size").textContent = `${(d.size_bytes / 1e6).toFixed(1)} MB`;
+  }
+  if (state === "done" && d.completed && d.total) {
+    libSummary.textContent = `${d.completed} / ${d.total} entries`;
+  }
+}
 
 const COOKSTOWN = [54.6479, -6.7456]; // default centre
 

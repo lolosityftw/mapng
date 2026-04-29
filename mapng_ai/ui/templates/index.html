@@ -13,8 +13,23 @@
 
 <header>
   <h1>MapNG-AI</h1>
-  <span class="status" id="status">idle</span>
+  <div class="header-right">
+    <span class="lib-status" id="lib-status">library: …</span>
+    <button id="lib-build" class="ghost">Build region pack</button>
+    <span class="status" id="status">idle</span>
+  </div>
 </header>
+
+<div id="lib-panel" hidden>
+  <div class="lib-panel-inner">
+    <div class="lib-panel-head">
+      <h3>Region pack — Meshy AI generation</h3>
+      <button id="lib-close" class="ghost">×</button>
+    </div>
+    <div id="lib-summary" class="lib-summary"></div>
+    <ol id="lib-list"></ol>
+  </div>
+</div>
 
 <main>
 

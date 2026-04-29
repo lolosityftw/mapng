@@ -1,12 +1,11 @@
-"""Provider chain: APIProvider → LibraryProvider → PlaceholderProvider.
+"""Provider chain: LibraryProvider → PlaceholderProvider.
 
-`get_building` walks the chain and returns the first non-None result. Each
-provider's `can_provide` check is honoured; placeholder is the universal
-fallback so a building always gets *something*.
+The runtime pipeline never hits the AI mesh API directly — that's the
+batch-builder's job (`python -m mapng_ai.library_builder build`). Once the
+library is populated, every map gen is deterministic and free.
 """
 from __future__ import annotations
 
-from mapng_ai.assets.api_provider import APIProvider
 from mapng_ai.assets.base import BuildingAsset
 from mapng_ai.assets.library import LibraryProvider
 from mapng_ai.assets.placeholder import PlaceholderProvider
@@ -16,12 +15,11 @@ class ProviderChain:
     name = "chain"
 
     def __init__(self) -> None:
-        self.api = APIProvider()
         self.library = LibraryProvider()
         self.placeholder = PlaceholderProvider()
 
     def can_provide(self, asset_kind: str) -> bool:
-        return any(p.can_provide(asset_kind) for p in (self.api, self.library, self.placeholder))
+        return any(p.can_provide(asset_kind) for p in (self.library, self.placeholder))
 
     def get_building(
         self,
@@ -30,11 +28,10 @@ class ProviderChain:
         building_type: str,
         seed: int,
     ) -> BuildingAsset:
-        for provider in (self.api, self.library, self.placeholder):
+        for provider in (self.library, self.placeholder):
             if not provider.can_provide("building"):
                 continue
             result = provider.get_building(footprint_m2, levels, building_type, seed)
             if result is not None:
                 return result
-        # Should never reach here — placeholder always returns something
         return self.placeholder.get_building(footprint_m2, levels, building_type, seed)

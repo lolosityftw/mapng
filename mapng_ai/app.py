@@ -16,6 +16,8 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from mapng_ai import config
+from mapng_ai.library_builder import build_library
+from mapng_ai.library_builder.runner import library_status
 from mapng_ai.pipeline import BBox, JobContext, run_pipeline
 
 
@@ -130,6 +132,71 @@ async def stream_events(job_id: str) -> EventSourceResponse:
     job = _jobs.get(job_id)
     if job is None:
         raise HTTPException(404, "Unknown job_id")
+
+    async def event_gen() -> AsyncIterator[dict]:
+        while True:
+            item = await job.queue.get()
+            if item is None:
+                break
+            event, data = item
+            yield {"event": event, "data": json.dumps(data)}
+
+    return EventSourceResponse(event_gen())
+
+
+# ---------------------------------------------------------------------------
+# Library batch builder
+# ---------------------------------------------------------------------------
+_library_jobs: dict[str, _Job] = {}
+
+
+@app.get("/api/library/status")
+async def get_library_status() -> dict:
+    return library_status()
+
+
+class LibraryBuildRequest(BaseModel):
+    categories: list[str] | None = None     # None = all
+
+
+@app.post("/api/library/build")
+async def post_library_build(req: LibraryBuildRequest) -> dict:
+    job_id = uuid.uuid4().hex[:12]
+    queue: asyncio.Queue[tuple[str, dict] | None] = asyncio.Queue()
+
+    class _LibJob:
+        def __init__(self):
+            self.queue = queue
+            self.done = False
+            self.ctx = type("ctx", (), {"out_dir": config.OUTPUT_DIR})()  # dummy
+
+        async def emit(self, event: str, data: dict) -> None:
+            await self.queue.put((event, data))
+
+        async def close(self) -> None:
+            self.done = True
+            await self.queue.put(None)
+
+    job = _LibJob()
+    _library_jobs[job_id] = job
+
+    async def _run():
+        try:
+            await build_library(categories=req.categories, emit=job.emit)
+        except Exception as exc:
+            await job.emit("batch:error", {"message": f"{type(exc).__name__}: {exc}"})
+        finally:
+            await job.close()
+
+    asyncio.create_task(_run())
+    return {"job_id": job_id}
+
+
+@app.get("/api/library/jobs/{job_id}/events")
+async def stream_library_events(job_id: str) -> EventSourceResponse:
+    job = _library_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "Unknown library job_id")
 
     async def event_gen() -> AsyncIterator[dict]:
         while True:

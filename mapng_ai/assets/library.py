@@ -115,3 +115,74 @@ class LibraryProvider:
             color_hex="#999999",
             type_label=chosen.type_label,
         )
+
+
+# ---------------------------------------------------------------------------
+# Tree library — same idea, but for trees/<species>/ folders
+# ---------------------------------------------------------------------------
+_TREE_ROOT = config.ROOT / "assets" / "trees"
+_VEHICLE_ROOT = config.ROOT / "assets" / "vehicles"
+
+
+@dataclass(frozen=True)
+class _LeafEntry:
+    rel_path: str
+    fs_path: Path
+    type_label: str
+
+
+def _scan_simple(root: Path, kind: str) -> dict[str, list[_LeafEntry]]:
+    out: dict[str, list[_LeafEntry]] = {}
+    if not root.exists():
+        return out
+    for sub in sorted(root.iterdir()):
+        if not sub.is_dir():
+            continue
+        for mesh_path in sorted(sub.iterdir()):
+            if mesh_path.suffix.lower() not in (".dae", ".glb", ".gltf"):
+                continue
+            entry = _LeafEntry(
+                rel_path=f"art/shapes/{kind}_lib/{sub.name}/{mesh_path.name}",
+                fs_path=mesh_path,
+                type_label=sub.name.lower(),
+            )
+            out.setdefault(sub.name.lower(), []).append(entry)
+    return out
+
+
+_TREE_INDEX: dict[str, list[_LeafEntry]] | None = None
+_VEHICLE_INDEX: dict[str, list[_LeafEntry]] | None = None
+
+
+def tree_library() -> dict[str, list[_LeafEntry]]:
+    global _TREE_INDEX
+    if _TREE_INDEX is None:
+        _TREE_INDEX = _scan_simple(_TREE_ROOT, "trees")
+    return _TREE_INDEX
+
+
+def vehicle_library() -> dict[str, list[_LeafEntry]]:
+    global _VEHICLE_INDEX
+    if _VEHICLE_INDEX is None:
+        _VEHICLE_INDEX = _scan_simple(_VEHICLE_ROOT, "vehicles")
+    return _VEHICLE_INDEX
+
+
+def pick_tree(seed: int) -> _LeafEntry | None:
+    """Return a deterministic tree from the library, None if empty."""
+    idx = tree_library()
+    flat = [e for entries in idx.values() for e in entries]
+    if not flat:
+        return None
+    return flat[seed % len(flat)]
+
+
+def pick_vehicle(kind: str | None, seed: int) -> _LeafEntry | None:
+    idx = vehicle_library()
+    if kind and kind in idx:
+        candidates = idx[kind]
+    else:
+        candidates = [e for entries in idx.values() for e in entries]
+    if not candidates:
+        return None
+    return candidates[seed % len(candidates)]

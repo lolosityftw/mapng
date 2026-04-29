@@ -19,6 +19,7 @@ import numpy as np
 from pyproj import Transformer
 from shapely.geometry import LineString, Polygon
 
+from mapng_ai.assets.library import pick_tree, tree_library
 from mapng_ai.pipeline.region import Region
 from mapng_ai.sources.overpass import OSMData, way_line_ll, way_polygon_ll
 
@@ -40,6 +41,8 @@ class TreePlacement:
     z: float
     scale_xyz: tuple[float, float, float]
     yaw: float
+    shape_relpath: str = "art/shapes/foliage/tree.dae"
+    species: str = "default"
 
 
 @dataclass(frozen=True)
@@ -206,10 +209,14 @@ def place_foliage(osm: OSMData, region: Region, heightmap_m: np.ndarray, *, seed
             radius = float(2.0 + sr.random() * 1.5)
             yaw = float(sr.random() * 2 * np.pi)
             z = _z_at(heightmap_m, region.side_m, wx, wy)
+            lib_pick = pick_tree(sub_seed)
+            shape_rel = lib_pick.rel_path if lib_pick else "art/shapes/foliage/tree.dae"
+            species = lib_pick.type_label if lib_pick else "default"
             trees.append(TreePlacement(
                 x=wx, y=wy, z=z,
                 scale_xyz=(radius, radius, height),
                 yaw=yaw,
+                shape_relpath=shape_rel, species=species,
             ))
         if len(trees) >= MAX_TREES:
             break
