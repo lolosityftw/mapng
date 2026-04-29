@@ -14,12 +14,16 @@ from typing import Any, Awaitable, Callable
 from mapng_ai import config
 from mapng_ai.assets.placeholder import PlaceholderProvider
 from mapng_ai.pipeline.beamng_level import LevelPackage, write_level_package
+from mapng_ai.pipeline.classmap import build_class_map
 from mapng_ai.pipeline.heightmap import HeightmapResult, build_heightmap
 from mapng_ai.pipeline.placement import BuildingPlacement, place_buildings
 from mapng_ai.pipeline.region import Region, resolve_region
+from mapng_ai.pipeline.splatting import SplatResult, build_splat
 from mapng_ai.sources.base import BBoxLL, ElevationSource, ElevationTile
 from mapng_ai.sources.coverage import select_elevation_source
 from mapng_ai.sources.overpass import OSMData, fetch_osm
+
+import numpy as np
 
 
 @dataclass
@@ -33,6 +37,8 @@ class JobContext:
     elevation_tile: ElevationTile | None = None
     heightmap: HeightmapResult | None = None
     osm: OSMData | None = None
+    class_map: "np.ndarray | None" = None
+    splat: SplatResult | None = None
     buildings: list[BuildingPlacement] = field(default_factory=list)
     level_package: LevelPackage | None = None
 
@@ -101,6 +107,40 @@ async def stage_heightmap(ctx: JobContext, emit: Emit) -> None:
     })
 
 
+async def stage_segment(ctx: JobContext, emit: Emit) -> None:
+    """Phase 4 MVP: rasterise OSM features into a class map (no AI yet).
+
+    The pretrained-model upgrade per spec §4.1 will replace this function and
+    keep the same `class_map` output shape/semantics."""
+    assert ctx.osm and ctx.region
+    size = ctx.region.heightmap_size
+    ctx.class_map = await asyncio.to_thread(build_class_map, ctx.osm, ctx.region, size)
+    # Class histogram for the UI
+    unique, counts = np.unique(ctx.class_map, return_counts=True)
+    total = float(counts.sum())
+    hist = [{"id": int(u), "pct": round(float(c) / total * 100, 1)} for u, c in zip(unique, counts)]
+    await emit("stage:info", {"key": "segment", "source": "osm-rasterise", "histogram": hist})
+
+
+async def stage_splat(ctx: JobContext, emit: Emit) -> None:
+    assert ctx.class_map is not None
+    ctx.splat = await asyncio.to_thread(build_splat, ctx.class_map, ctx.out_dir)
+    layers_payload = [
+        {"key": l.cls.key, "label": l.cls.label, "color": list(l.cls.color_rgb),
+         "coverage_pct": round(l.coverage_pct, 1)}
+        for l in ctx.splat.layers
+    ]
+    ctx.artifacts["terrain_combined"] = (
+        f"/api/jobs/{ctx.job_id}/files/{ctx.splat.combined_diffuse_path.name}"
+    )
+    await emit("stage:info", {
+        "key": "splat",
+        "layers": layers_payload,
+        "n_layers": len(ctx.splat.layers),
+        "combined_url": ctx.artifacts["terrain_combined"],
+    })
+
+
 async def stage_place(ctx: JobContext, emit: Emit) -> None:
     assert ctx.osm and ctx.region and ctx.heightmap
     provider = PlaceholderProvider()
@@ -131,6 +171,7 @@ async def stage_export(ctx: JobContext, emit: Emit) -> None:
         side_m=ctx.region.side_m,
         out_dir=ctx.out_dir,
         buildings=ctx.buildings,
+        splat=ctx.splat,
     )
     ctx.level_package = pkg
     ctx.artifacts["level_zip"] = f"/api/jobs/{ctx.job_id}/files/{pkg.zip_path.name}"
@@ -170,8 +211,8 @@ STAGES: tuple[Stage, ...] = (
     Stage("region",    "Resolve region",                stage_region),
     Stage("fetch",     "Fetch DEM / imagery / OSM",     stage_fetch),
     Stage("heightmap", "Build heightmap",               stage_heightmap),
-    Stage("segment",   "Land-cover segmentation",       None),  # filled at runtime
-    Stage("splat",     "Material splatting",            None),
+    Stage("segment",   "Land-cover segmentation",       stage_segment),
+    Stage("splat",     "Material splatting",            stage_splat),
     Stage("place",     "Object placement",              stage_place),
     Stage("export",    "BeamNG export",                 stage_export),
 )

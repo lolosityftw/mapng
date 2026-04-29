@@ -35,6 +35,7 @@ from mapng_ai import config
 from mapng_ai.assets.placeholder import write_unit_box_dae
 from mapng_ai.pipeline.beamng_ter import write_ter
 from mapng_ai.pipeline.placement import BuildingPlacement
+from mapng_ai.pipeline.splatting import SplatResult
 
 
 # ---------------------------------------------------------------------------
@@ -76,16 +77,41 @@ def _terrain_json(level_name: str, size_px: int, materials: list[str]) -> dict:
     }
 
 
-def _terrain_materials_json(level_name: str, size_m: float) -> dict:
-    return {
-        "DefaultMaterial": {
-            "class":        "TerrainMaterial",
-            "internalName": "DefaultMaterial",
-            "diffuseMap":   f"levels/{level_name}/art/terrains/terrain.png",
-            "diffuseSize":  int(size_m),
-            "groundmodelName": "GROUNDMODEL_ASPHALT1",
-        },
+def _terrain_materials_json(level_name: str, size_m: float,
+                            splat: SplatResult | None = None) -> dict:
+    if splat is None:
+        return {
+            "DefaultMaterial": {
+                "class":        "TerrainMaterial",
+                "internalName": "DefaultMaterial",
+                "diffuseMap":   f"levels/{level_name}/art/terrains/terrain.png",
+                "diffuseSize":  int(size_m),
+                "groundmodelName": "GROUNDMODEL_ASPHALT1",
+            },
+        }
+
+    _GROUNDMODELS = {
+        "asphalt":  "GROUNDMODEL_ASPHALT1",
+        "concrete": "GROUNDMODEL_CONCRETE",
+        "lawn":     "GROUNDMODEL_GRASS",
+        "pasture":  "GROUNDMODEL_GRASS",
+        "earth":    "GROUNDMODEL_DIRT",
+        "gravel":   "GROUNDMODEL_GRAVEL",
+        "water":    "GROUNDMODEL_ASPHALT1",
+        "forest":   "GROUNDMODEL_GRASS",
     }
+    out: dict = {}
+    for layer in splat.layers:
+        key = layer.cls.key
+        out[f"mat_{key}"] = {
+            "class":        "TerrainMaterial",
+            "internalName": f"mat_{key}",
+            "diffuseMap":   f"levels/{level_name}/art/terrains/diffuse_{key}.png",
+            "diffuseSize":  4,
+            "blendMap":     f"levels/{level_name}/art/terrains/opacity_{key}.png",
+            "groundmodelName": _GROUNDMODELS.get(key, "GROUNDMODEL_GRASS"),
+        }
+    return out
 
 
 def _yaw_rotation_matrix(yaw: float) -> list[float]:
@@ -264,6 +290,7 @@ def write_level_package(
     material_names: list[str] | None = None,
     terrain_png_bytes: bytes | None = None,
     buildings: Sequence[BuildingPlacement] = (),
+    splat: SplatResult | None = None,
 ) -> LevelPackage:
     out_dir.mkdir(parents=True, exist_ok=True)
     zip_path = out_dir / f"{level_name}.zip"
@@ -272,7 +299,18 @@ def write_level_package(
     if heightmap_m.shape[1] != size_px:
         raise ValueError("heightmap must be square")
 
-    materials = material_names or ["DefaultMaterial"]
+    if splat is not None:
+        materials = [f"mat_{l.cls.key}" for l in splat.layers]
+        # splat.layer_index_map holds class IDs (0..9). Remap to material-array
+        # indices (0..len(materials)-1) — that's what the .ter writer wants.
+        remap = np.zeros(256, dtype=np.uint8)
+        for arr_idx, layer in enumerate(splat.layers):
+            remap[layer.cls.id] = arr_idx
+        layer_map = remap[splat.layer_index_map]
+    elif material_names is not None:
+        materials = list(material_names)
+    else:
+        materials = ["DefaultMaterial"]
 
     # Write the .ter to a temp buffer
     ter_path = out_dir / "_tmp_theTerrain.ter"
@@ -308,10 +346,20 @@ def write_level_package(
       json.dumps(_terrain_json(level_name, size_px, materials), indent=2))
     w(f"{base}/theTerrain.terrainheightmap.png", _heightmap_visual_png(heightmap_m))
 
-    # Materials + base diffuse texture
+    # Materials JSON
     w(f"{base}/art/terrains/main.materials.json",
-      json.dumps(_terrain_materials_json(level_name, side_m), indent=2))
-    w(f"{base}/art/terrains/terrain.png", terrain_png_bytes or _flat_terrain_png())
+      json.dumps(_terrain_materials_json(level_name, side_m, splat), indent=2))
+
+    # Per-class diffuse + opacity layers (Phase 4) and a combined preview
+    if splat is not None:
+        for layer in splat.layers:
+            w(f"{base}/art/terrains/diffuse_{layer.cls.key}.png",
+              layer.diffuse_path.read_bytes())
+            w(f"{base}/art/terrains/opacity_{layer.cls.key}.png",
+              layer.opacity_path.read_bytes())
+        w(f"{base}/art/terrains/terrain.png", splat.combined_diffuse_path.read_bytes())
+    else:
+        w(f"{base}/art/terrains/terrain.png", terrain_png_bytes or _flat_terrain_png())
 
     # Building shape (single shared box.dae). Cache it in mapng_ai/cache/shapes/
     # so we don't trip Windows file locks via tempfile cleanup.

@@ -155,6 +155,19 @@ function loadImage(url) {
   });
 }
 
+async function setTerrainTexture(url) {
+  if (!state.scene || !state.terrainMesh) return;
+  const loader = new THREE.TextureLoader();
+  loader.crossOrigin = "anonymous";
+  loader.load(url, (tex) => {
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.flipY = false;        // we already orient the geometry
+    state.terrainMesh.material.map = tex;
+    state.terrainMesh.material.color = new THREE.Color(0xffffff);
+    state.terrainMesh.material.needsUpdate = true;
+  }, undefined, (err) => console.error("[preview] texture load failed", err));
+}
+
 function setBuildings(buildings) {
   if (!state.scene) return;
   // Wipe any previous buildings group
@@ -180,4 +193,4 @@ function setBuildings(buildings) {
   state.buildings = group;
 }
 
-window.MapNGPreview = { setHeightmap, setBuildings };
+window.MapNGPreview = { setHeightmap, setTerrainTexture, setBuildings };
