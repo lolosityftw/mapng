@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from typing import AsyncIterator
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
@@ -20,7 +21,20 @@ from mapng_ai.pipeline import BBox, JobContext, run_pipeline
 config.ensure_runtime_dirs()
 
 app = FastAPI(title="MapNG-AI", version="0.1.0")
-app.mount("/static", StaticFiles(directory=str(config.STATIC_DIR)), name="static")
+
+# Cache-bust static asset URLs every time the server starts, so the browser
+# never serves stale UI code after we restart.
+BUILD_ID = str(int(time.time()))
+
+
+class _NoCacheStatic(StaticFiles):
+    async def get_response(self, path: str, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return resp
+
+
+app.mount("/static", _NoCacheStatic(directory=str(config.STATIC_DIR)), name="static")
 
 
 # ---------------------------------------------------------------------------
@@ -61,8 +75,10 @@ class GenerateResponse(BaseModel):
 # Routes
 # ---------------------------------------------------------------------------
 @app.get("/")
-async def index() -> FileResponse:
-    return FileResponse(config.TEMPLATES_DIR / "index.html")
+async def index() -> HTMLResponse:
+    html = (config.TEMPLATES_DIR / "index.html").read_text(encoding="utf-8")
+    html = html.replace("__BUILD__", BUILD_ID)
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 @app.get("/api/health")

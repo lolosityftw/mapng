@@ -140,6 +140,7 @@ generateBtn.addEventListener("click", async () => {
   stagesEl.innerHTML = "";
   document.getElementById("downloads").hidden = true;
   document.getElementById("download-list").innerHTML = "";
+  window.MapNGPreview?.reset?.();
 
   const res = await fetch("/api/generate", {
     method: "POST",
