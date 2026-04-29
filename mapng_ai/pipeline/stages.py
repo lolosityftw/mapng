@@ -229,6 +229,22 @@ async def stage_place(ctx: JobContext, emit: Emit) -> None:
         {"width": r.width_m, "nodes": [list(n) for n in r.nodes_xyz]}
         for r in ctx.decal_roads
     ]
+    # Diagnostics: how many of each placement came from where
+    src_counts = {"library": 0, "meshy": 0, "placeholder": 0}
+    for b in ctx.buildings:
+        rel = b.asset.shape_relpath
+        if rel.startswith("art/shapes/buildings_lib/"):
+            src_counts["library"] += 1
+        elif rel.startswith("art/shapes/buildings_ai/"):
+            src_counts["meshy"] += 1
+        else:
+            src_counts["placeholder"] += 1
+
+    tree_lib_count = sum(
+        1 for t in ctx.foliage.trees
+        if t.shape_relpath.startswith("art/shapes/trees_lib/")
+    )
+
     await emit("stage:info", {
         "key": "place",
         "buildings": buildings_payload,
@@ -236,7 +252,9 @@ async def stage_place(ctx: JobContext, emit: Emit) -> None:
         "hedges": hedges_payload,
         "roads": roads_payload,
         "n_buildings": len(ctx.buildings),
+        "buildings_by_source": src_counts,
         "n_trees": len(ctx.foliage.trees),
+        "trees_from_library": tree_lib_count,
         "n_hedges": len(ctx.foliage.hedges),
         "n_roads": len(ctx.decal_roads),
     })

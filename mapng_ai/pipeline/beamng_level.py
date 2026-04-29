@@ -437,9 +437,11 @@ def write_level_package(
     else:
         w(f"{base}/art/terrains/terrain.png", _flat_terrain_png())
 
-    # Building shapes — one DAE/GLB per unique resolved file. AI-generated
-    # GLBs (from Meshy etc.) live in the Meshy cache; placeholder DAEs in
-    # the shapes cache. Both look the same to BeamNG.
+    # Building shapes — one DAE/GLB per unique resolved file. Three sources:
+    #   1. AI-generated GLBs at art/shapes/buildings_ai/  → Meshy cache
+    #   2. Region-pack library GLBs at art/shapes/buildings_lib/  → assets/buildings/
+    #   3. Procedural placeholder DAEs at art/shapes/buildings/  → cache/shapes/
+    from mapng_ai.assets.library import building_library_fs_path
     from mapng_ai.assets.meshy import _CACHE_DIR as _MESHY_CACHE
     if buildings:
         seen: set[str] = set()
@@ -448,14 +450,22 @@ def write_level_package(
             if rel in seen:
                 continue
             seen.add(rel)
+
+            # 2) Region-pack library
+            lib_fs = building_library_fs_path(rel)
+            if lib_fs is not None:
+                w(f"{base}/{rel}", lib_fs.read_bytes())
+                continue
+
+            # 1) Direct Meshy (legacy path; still supported)
             if rel.startswith("art/shapes/buildings_ai/"):
-                # Meshy: filename is meshy_<key>.glb in the cache
                 stem = Path(rel).stem.replace("meshy_", "")
                 glb = _MESHY_CACHE / f"{stem}.glb"
                 if glb.exists():
                     w(f"{base}/{rel}", glb.read_bytes())
                     continue
-                # Fallback if cache went missing somehow → write placeholder
+
+            # 3) Placeholder DAE fallback
             cache_path, fallback_rel = write_pitched_dae(
                 b.asset.type_label.replace("_meshy", "")
             )

@@ -35,6 +35,73 @@ from mapng_ai.assets.base import AssetProvider, BuildingAsset
 _LIBRARY_ROOT = config.ROOT / "assets" / "buildings"
 
 
+# OSM `building=*` values vary widely; map common synonyms to the folders
+# the catalogue actually populates. First match wins; "default" is the
+# universal fallback.
+_BUILDING_TYPE_ALIASES: dict[str, list[str]] = {
+    # Residential (OSM uses many tags for the same thing)
+    "house":           ["residential", "default"],
+    "detached":        ["residential", "default"],
+    "semi":            ["residential", "default"],
+    "semidetached":    ["residential", "default"],
+    "semidetached_house": ["residential", "default"],
+    "terrace":         ["residential", "default"],
+    "bungalow":        ["residential", "default"],
+    "apartment":       ["residential", "default"],
+    "apartments":      ["residential", "default"],
+    "dormitory":       ["residential", "default"],
+    "static_caravan":  ["residential", "default"],
+    "residential":     ["residential", "default"],
+
+    # Commercial / civic
+    "office":          ["commercial", "default"],
+    "supermarket":     ["shop", "commercial", "default"],
+    "kiosk":           ["shop", "commercial", "default"],
+    "retail":          ["shop", "commercial", "default"],
+    "commercial":      ["commercial", "default"],
+    "shop":            ["shop", "commercial", "default"],
+    "hotel":           ["commercial", "default"],
+    "service":         ["commercial", "default"],
+    "church":          ["civic", "default"],
+    "chapel":          ["civic", "default"],
+    "religious":       ["civic", "default"],
+    "cathedral":       ["civic", "default"],
+    "school":          ["civic", "default"],
+    "kindergarten":    ["civic", "default"],
+    "college":         ["civic", "default"],
+    "hospital":        ["civic", "default"],
+    "civic":           ["civic", "default"],
+    "public":          ["civic", "default"],
+    "government":      ["civic", "default"],
+
+    # Agricultural / industrial
+    "industrial":      ["industrial", "default"],
+    "warehouse":       ["industrial", "default"],
+    "factory":         ["industrial", "default"],
+    "manufacture":     ["industrial", "default"],
+    "barn":            ["barn", "shed", "default"],
+    "shed":            ["shed", "barn", "default"],
+    "stable":          ["shed", "barn", "default"],
+    "cowshed":         ["shed", "barn", "default"],
+    "farm_auxiliary":  ["shed", "barn", "default"],
+    "farm":            ["barn", "residential", "default"],
+    "greenhouse":      ["shed", "default"],
+    "garage":          ["garage", "default"],
+    "garages":         ["garage", "default"],
+    "carport":         ["garage", "default"],
+    "container":       ["default"],
+}
+
+
+def _resolve_type_chain(building_type: str) -> list[str]:
+    """Return the priority list of catalogue types for an OSM building tag."""
+    bt = (building_type or "default").lower()
+    if bt in _BUILDING_TYPE_ALIASES:
+        return _BUILDING_TYPE_ALIASES[bt]
+    # Unknown tag — try the literal type then default
+    return [bt, "default"]
+
+
 @dataclass(frozen=True)
 class _LibraryEntry:
     rel_path: str           # relative to library root, used inside the level zip
@@ -99,13 +166,17 @@ class LibraryProvider:
         building_type: str,
         seed: int,
     ) -> BuildingAsset | None:
-        candidates = self._index.get(building_type) or self._index.get("default")
+        # Try the alias chain in order; first folder with any GLB wins.
+        candidates: list[_LibraryEntry] | None = None
+        for t in _resolve_type_chain(building_type):
+            if t in self._index and self._index[t]:
+                candidates = self._index[t]
+                break
         if not candidates:
             return None
         # Pick deterministically by seed, biased toward similar floor count
         candidates_sorted = sorted(candidates, key=lambda e: abs(e.levels - levels))
         rng = random.Random(seed)
-        # Top 3 by closest level → uniform random one of those
         pool = candidates_sorted[: min(3, len(candidates_sorted))]
         chosen = rng.choice(pool)
         l, w = chosen.footprint_m
@@ -166,6 +237,17 @@ def vehicle_library() -> dict[str, list[_LeafEntry]]:
     if _VEHICLE_INDEX is None:
         _VEHICLE_INDEX = _scan_simple(_VEHICLE_ROOT, "vehicles")
     return _VEHICLE_INDEX
+
+
+def building_library_fs_path(rel_path: str) -> Path | None:
+    """Translate `art/shapes/buildings_lib/<type>/<file>` → on-disk path.
+    Returns None if the file isn't present."""
+    prefix = "art/shapes/buildings_lib/"
+    if not rel_path.startswith(prefix):
+        return None
+    tail = rel_path[len(prefix):]
+    fs = _LIBRARY_ROOT / tail
+    return fs if fs.exists() else None
 
 
 def pick_tree(seed: int) -> _LeafEntry | None:
