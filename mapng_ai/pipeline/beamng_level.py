@@ -22,14 +22,19 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 from PIL import Image
 
+from mapng_ai import config
+from mapng_ai.assets.placeholder import write_unit_box_dae
 from mapng_ai.pipeline.beamng_ter import write_ter
+from mapng_ai.pipeline.placement import BuildingPlacement
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +86,28 @@ def _terrain_materials_json(level_name: str, size_m: float) -> dict:
             "groundmodelName": "GROUNDMODEL_ASPHALT1",
         },
     }
+
+
+def _yaw_rotation_matrix(yaw: float) -> list[float]:
+    c, s = math.cos(yaw), math.sin(yaw)
+    return [c, -s, 0, s, c, 0, 0, 0, 1]
+
+
+def _building_tsstatics(level_name: str, buildings: Sequence[BuildingPlacement]) -> list[dict]:
+    out: list[dict] = []
+    for b in buildings:
+        sx, sy, sz = b.scale_xyz
+        out.append({
+            "class": "TSStatic",
+            "name": f"bld_{b.osm_id}",
+            "shapeName": f"/levels/{level_name}/{b.asset.shape_relpath}",
+            # Box DAE is centred at origin, so lift by half the height
+            "position": [b.x_m, b.y_m, b.z_m + sz / 2.0],
+            "rotationMatrix": _yaw_rotation_matrix(b.yaw_rad),
+            "scale": [sx, sy, sz],
+            "instanceColor": [0.78, 0.74, 0.62, 1.0],
+        })
+    return out
 
 
 def _level_objects(level_name: str, size_m: float, terrain_min_m: float, terrain_max_m: float,
@@ -156,30 +183,35 @@ def _spawn_objects(spawn_x: float, spawn_y: float, spawn_z: float) -> list[dict]
 
 
 def _mission_group(level_name: str, size_m: float, terrain_min_m: float, terrain_max_m: float,
-                   spawn_xyz: tuple[float, float, float]) -> dict:
+                   spawn_xyz: tuple[float, float, float],
+                   buildings: Sequence[BuildingPlacement]) -> dict:
     sx, sy, sz = spawn_xyz
-    return {
-        "class": "SimGroup",
-        "name": "MissionGroup",
-        "children": [
-            {
-                "class": "SimGroup", "name": "PlayerDropPoints",
-                "children": _spawn_objects(sx, sy, sz),
-            },
-            {
-                "class": "SimGroup", "name": "Level_objects",
-                "children": _level_objects(level_name, size_m, terrain_min_m, terrain_max_m, sx, sy, sz),
-            },
-        ],
-    }
+    children = [
+        {
+            "class": "SimGroup", "name": "PlayerDropPoints",
+            "children": _spawn_objects(sx, sy, sz),
+        },
+        {
+            "class": "SimGroup", "name": "Level_objects",
+            "children": _level_objects(level_name, size_m, terrain_min_m, terrain_max_m, sx, sy, sz),
+        },
+    ]
+    if buildings:
+        children.append({
+            "class": "SimGroup",
+            "name": "buildings",
+            "children": _building_tsstatics(level_name, buildings),
+        })
+    return {"class": "SimGroup", "name": "MissionGroup", "children": children}
 
 
 def _items_level_root(level_name: str, size_m: float, t_min: float, t_max: float,
-                      spawn: tuple[float, float, float]) -> dict:
+                      spawn: tuple[float, float, float],
+                      buildings: Sequence[BuildingPlacement]) -> dict:
     return {
         "class": "SimGroup",
         "name": "MissionCleanup",
-        "children": [_mission_group(level_name, size_m, t_min, t_max, spawn)],
+        "children": [_mission_group(level_name, size_m, t_min, t_max, spawn, buildings)],
     }
 
 
@@ -231,6 +263,7 @@ def write_level_package(
     layer_map: np.ndarray | None = None,
     material_names: list[str] | None = None,
     terrain_png_bytes: bytes | None = None,
+    buildings: Sequence[BuildingPlacement] = (),
 ) -> LevelPackage:
     out_dir.mkdir(parents=True, exist_ok=True)
     zip_path = out_dir / f"{level_name}.zip"
@@ -280,8 +313,17 @@ def write_level_package(
       json.dumps(_terrain_materials_json(level_name, side_m), indent=2))
     w(f"{base}/art/terrains/terrain.png", terrain_png_bytes or _flat_terrain_png())
 
+    # Building shape (single shared box.dae). Cache it in mapng_ai/cache/shapes/
+    # so we don't trip Windows file locks via tempfile cleanup.
+    if buildings:
+        shape_cache = config.CACHE_DIR / "shapes"
+        shape_cache.mkdir(parents=True, exist_ok=True)
+        box_path = shape_cache / "box.dae"
+        write_unit_box_dae(box_path)
+        w(f"{base}/art/shapes/buildings/box.dae", box_path.read_bytes())
+
     # Scene graph (the SimGroup tree BeamNG loads)
-    items = _items_level_root(level_name, side_m, t_min, t_max, spawn_xyz)
+    items = _items_level_root(level_name, side_m, t_min, t_max, spawn_xyz, buildings)
     w(f"{base}/main/items.level.json", json.dumps(items, indent=2))
 
     # Build the ZIP

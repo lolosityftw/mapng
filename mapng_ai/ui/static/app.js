@@ -180,6 +180,9 @@ generateBtn.addEventListener("click", async () => {
         maxM: data.max_m,
       }).catch((e) => console.error("[preview]", e));
     }
+    if (data.key === "place" && data.buildings) {
+      window.MapNGPreview?.setBuildings?.(data.buildings);
+    }
     if (data.key === "export" && data.zip_url) {
       addDownload(data.zip_url, `${data.level_name}.zip`, formatBytes(data.zip_bytes));
     }

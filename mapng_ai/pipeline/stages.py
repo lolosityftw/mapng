@@ -12,11 +12,14 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from mapng_ai import config
+from mapng_ai.assets.placeholder import PlaceholderProvider
 from mapng_ai.pipeline.beamng_level import LevelPackage, write_level_package
 from mapng_ai.pipeline.heightmap import HeightmapResult, build_heightmap
+from mapng_ai.pipeline.placement import BuildingPlacement, place_buildings
 from mapng_ai.pipeline.region import Region, resolve_region
 from mapng_ai.sources.base import BBoxLL, ElevationSource, ElevationTile
 from mapng_ai.sources.coverage import select_elevation_source
+from mapng_ai.sources.overpass import OSMData, fetch_osm
 
 
 @dataclass
@@ -29,6 +32,8 @@ class JobContext:
     elevation_source: ElevationSource | None = None
     elevation_tile: ElevationTile | None = None
     heightmap: HeightmapResult | None = None
+    osm: OSMData | None = None
+    buildings: list[BuildingPlacement] = field(default_factory=list)
     level_package: LevelPackage | None = None
 
     artifacts: dict[str, str] = field(default_factory=dict)
@@ -61,9 +66,20 @@ async def stage_region(ctx: JobContext, emit: Emit) -> None:
 
 async def stage_fetch(ctx: JobContext, emit: Emit) -> None:
     assert ctx.region and ctx.elevation_source
-    ctx.elevation_tile = await ctx.elevation_source.fetch(ctx.region.fetch_ll)
+    # Fetch elevation + OSM in parallel
+    elev_task = asyncio.create_task(ctx.elevation_source.fetch(ctx.region.fetch_ll))
+    osm_task = asyncio.create_task(fetch_osm(ctx.region.fetch_ll))
+    ctx.elevation_tile = await elev_task
+    ctx.osm = await osm_task
     rows, cols = ctx.elevation_tile.elevations_m.shape
-    await emit("stage:info", {"key": "fetch", "tile_rows": int(rows), "tile_cols": int(cols)})
+    n_buildings = sum(1 for w in ctx.osm.ways if "building" in (w.get("tags") or {}))
+    n_roads = sum(1 for w in ctx.osm.ways if "highway" in (w.get("tags") or {}))
+    await emit("stage:info", {
+        "key": "fetch",
+        "tile_rows": int(rows), "tile_cols": int(cols),
+        "osm_buildings": n_buildings, "osm_roads": n_roads,
+        "osm_ways_total": len(ctx.osm.ways),
+    })
 
 
 async def stage_heightmap(ctx: JobContext, emit: Emit) -> None:
@@ -85,6 +101,26 @@ async def stage_heightmap(ctx: JobContext, emit: Emit) -> None:
     })
 
 
+async def stage_place(ctx: JobContext, emit: Emit) -> None:
+    assert ctx.osm and ctx.region and ctx.heightmap
+    provider = PlaceholderProvider()
+    ctx.buildings = await asyncio.to_thread(
+        place_buildings, ctx.osm, ctx.region, ctx.heightmap.elevations_m, provider
+    )
+    # Send placement summary so the preview can draw boxes
+    payload = [
+        {
+            "x": p.x_m, "y": p.y_m, "z": p.z_m,
+            "yaw": p.yaw_rad,
+            "scale": list(p.scale_xyz),
+            "color": p.asset.color_hex,
+            "type": p.asset.type_label,
+        }
+        for p in ctx.buildings
+    ]
+    await emit("stage:info", {"key": "place", "buildings": payload})
+
+
 async def stage_export(ctx: JobContext, emit: Emit) -> None:
     assert ctx.heightmap and ctx.region
     level_name = f"mapng_{ctx.job_id}"
@@ -94,6 +130,7 @@ async def stage_export(ctx: JobContext, emit: Emit) -> None:
         heightmap_m=ctx.heightmap.elevations_m,
         side_m=ctx.region.side_m,
         out_dir=ctx.out_dir,
+        buildings=ctx.buildings,
     )
     ctx.level_package = pkg
     ctx.artifacts["level_zip"] = f"/api/jobs/{ctx.job_id}/files/{pkg.zip_path.name}"
@@ -103,6 +140,7 @@ async def stage_export(ctx: JobContext, emit: Emit) -> None:
         "zip_url": ctx.artifacts["level_zip"],
         "zip_bytes": pkg.zip_path.stat().st_size,
         "spawn_xyz": list(pkg.spawn_xyz),
+        "n_buildings": len(ctx.buildings),
     })
 
 
@@ -134,7 +172,7 @@ STAGES: tuple[Stage, ...] = (
     Stage("heightmap", "Build heightmap",               stage_heightmap),
     Stage("segment",   "Land-cover segmentation",       None),  # filled at runtime
     Stage("splat",     "Material splatting",            None),
-    Stage("place",     "Object placement",              None),
+    Stage("place",     "Object placement",              stage_place),
     Stage("export",    "BeamNG export",                 stage_export),
 )
 

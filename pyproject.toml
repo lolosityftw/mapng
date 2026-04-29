@@ -19,6 +19,7 @@ dependencies = [
     "pyproj>=3.6",
     "mercantile>=1.2",
     "trimesh>=4.5",
+    "pycollada>=0.8",
     "scipy>=1.13",
 ]
 

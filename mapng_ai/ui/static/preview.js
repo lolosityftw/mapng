@@ -155,4 +155,29 @@ function loadImage(url) {
   });
 }
 
-window.MapNGPreview = { setHeightmap };
+function setBuildings(buildings) {
+  if (!state.scene) return;
+  // Wipe any previous buildings group
+  if (state.buildings) {
+    state.scene.remove(state.buildings);
+    state.buildings.traverse((o) => {
+      if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); }
+    });
+  }
+  const group = new THREE.Group();
+  const unitGeo = new THREE.BoxGeometry(1, 1, 1);
+  for (const b of buildings) {
+    const [sx, sy, sz] = b.scale;
+    const mat = new THREE.MeshStandardMaterial({ color: b.color, roughness: 0.85 });
+    const m = new THREE.Mesh(unitGeo, mat);
+    m.scale.set(sx, sy, sz);
+    // Three.js convention: Y is up. Our placement coords are (x, y world, z height).
+    m.position.set(b.x, b.z + sz / 2, -b.y);  // Y-flip to match preview's right-handed view
+    m.rotation.y = -b.yaw;
+    group.add(m);
+  }
+  state.scene.add(group);
+  state.buildings = group;
+}
+
+window.MapNGPreview = { setHeightmap, setBuildings };
