@@ -21,6 +21,7 @@ dependencies = [
     "trimesh>=4.5",
     "pycollada>=0.8",
     "pygltflib>=1.16",
+    "fast-simplification>=0.1",
     "scipy>=1.13",
 ]
 

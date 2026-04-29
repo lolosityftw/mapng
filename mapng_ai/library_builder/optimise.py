@@ -33,17 +33,18 @@ from mapng_ai import config
 log = logging.getLogger(__name__)
 
 
-# Maximum texture dimension per preset. None = keep originals untouched.
-# (Geometry decimation with UV preservation is a TODO follow-up — it requires
-# attribute-aware vertex collapse which fast-simplification supports but trimesh
-# doesn't expose cleanly. Texture memory is the dominant browser bottleneck
-# anyway.)
-QUALITY_PRESETS: dict[str, int | None] = {
-    "ultra":   None,
-    "high":    1024,
-    "medium":  512,
-    "low":     256,
-    "minimum": 128,
+@dataclass(frozen=True)
+class QualityPreset:
+    max_texture_dim: int | None    # None = keep original
+    target_triangles: int | None   # None = keep original; cap per-mesh count
+
+
+QUALITY_PRESETS: dict[str, QualityPreset] = {
+    "ultra":   QualityPreset(max_texture_dim=None,  target_triangles=None),
+    "high":    QualityPreset(max_texture_dim=1024,  target_triangles=50_000),
+    "medium":  QualityPreset(max_texture_dim=512,   target_triangles=15_000),
+    "low":     QualityPreset(max_texture_dim=256,   target_triangles=5_000),
+    "minimum": QualityPreset(max_texture_dim=128,   target_triangles=1_500),
 }
 
 
@@ -111,6 +112,82 @@ def cache_path(src_path: Path, quality: str) -> Path:
         return src_path
     rel = src_path.stem
     return _OPT_CACHE / quality / f"{rel}.glb"
+
+
+def decimate_glb(src_path: Path, dst_path: Path, target_triangles: int) -> Path:
+    """Reduce per-mesh triangle count via fast-simplification while preserving
+    UVs through collapse replay. Materials are kept (single texture set per
+    mesh). Returns the destination path on success, src_path on failure.
+    """
+    import numpy as np
+    import trimesh
+    import fast_simplification as fs
+
+    scene = trimesh.load(src_path, force="scene", process=False)
+    if not isinstance(scene, trimesh.Scene):
+        scene = trimesh.Scene(scene)
+
+    new_scene = trimesh.Scene()
+    for name, geom in scene.geometry.items():
+        if not isinstance(geom, trimesh.Trimesh):
+            new_scene.add_geometry(geom, geom_name=name)
+            continue
+
+        face_count = len(geom.faces)
+        if face_count <= target_triangles:
+            new_scene.add_geometry(geom, geom_name=name)
+            continue
+
+        # Meshy-refine GLBs ship as 'exploded' meshes — every face has its own
+        # 3 vertices, none shared. fast-simplification can't break topological
+        # walls without welding first. merge_vertices with merge_tex+merge_norm
+        # collapses positionally-coincident verts so the simplifier can do its
+        # job; UV seams near texture boundaries are sacrificed (acceptable at
+        # game-distance viewing).
+        welded = geom.copy()
+        try:
+            welded.merge_vertices(merge_tex=True, merge_norm=True, digits_vertex=4)
+        except Exception:
+            pass
+
+        verts32 = np.ascontiguousarray(welded.vertices, dtype=np.float32)
+        faces32 = np.ascontiguousarray(welded.faces, dtype=np.int32)
+
+        try:
+            new_pts, new_faces, collapses = fs.simplify(
+                verts32, faces32, target_count=int(target_triangles), return_collapses=True,
+            )
+        except Exception as exc:
+            log.warning("decimate %s: simplify failed (%s) -- keeping original", name, exc)
+            new_scene.add_geometry(geom, geom_name=name)
+            continue
+
+        new_visual = welded.visual
+        # Replay UVs if the welded mesh has them
+        try:
+            uv = getattr(welded.visual, "uv", None)
+            if uv is not None and len(uv) == len(verts32):
+                uv_padded = np.column_stack([
+                    uv[:, 0].astype(np.float32),
+                    uv[:, 1].astype(np.float32),
+                    np.zeros(len(uv), dtype=np.float32),
+                ])
+                new_uv_padded, _, _ = fs.replay_simplification(uv_padded, faces32, collapses)
+                new_uv = new_uv_padded[:, :2]
+                new_visual = trimesh.visual.TextureVisuals(
+                    uv=new_uv, material=welded.visual.material,
+                )
+        except Exception as exc:
+            log.warning("decimate %s: UV replay failed (%s) -- using collapsed mesh without UVs", name, exc)
+
+        new_geom = trimesh.Trimesh(
+            vertices=new_pts, faces=new_faces, visual=new_visual, process=False,
+        )
+        new_scene.add_geometry(new_geom, geom_name=name)
+
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    new_scene.export(dst_path)
+    return dst_path
 
 
 def downsize_glb(src_path: Path, dst_path: Path, max_dim: int) -> None:
@@ -181,23 +258,42 @@ def downsize_glb(src_path: Path, dst_path: Path, max_dim: int) -> None:
 
 def optimise(src_path: Path, quality: str) -> Path:
     """Return path to the GLB at the requested quality, generating + caching
-    on first request."""
+    on first request. Two-pass: decimate geometry → downscale textures."""
     if quality not in QUALITY_PRESETS:
         raise ValueError(f"unknown quality: {quality}")
-    max_dim = QUALITY_PRESETS[quality]
-    if max_dim is None:                     # ultra → original
-        return src_path
+    preset = QUALITY_PRESETS[quality]
+    if preset.max_texture_dim is None and preset.target_triangles is None:
+        return src_path     # ultra: original
 
     dst = cache_path(src_path, quality)
     if dst.exists() and dst.stat().st_size > 0 and dst.stat().st_mtime >= src_path.stat().st_mtime:
         return dst
 
+    # Two-pass: decimate → texture downscale. We pipe through a temp file so the
+    # decimation result is the input to the texture pass.
+    temp = dst.with_suffix(".tmp.glb")
     try:
-        downsize_glb(src_path, dst, max_dim)
+        if preset.target_triangles is not None:
+            decimate_glb(src_path, temp, preset.target_triangles)
+            decimated_src = temp
+        else:
+            decimated_src = src_path
+
+        if preset.max_texture_dim is not None:
+            downsize_glb(decimated_src, dst, preset.max_texture_dim)
+        else:
+            shutil.copyfile(decimated_src, dst)
     except Exception as exc:
         log.warning("optimise %s @ %s failed: %s -- falling back to source",
                     src_path.name, quality, exc)
+        if temp.exists():
+            try: temp.unlink()
+            except Exception: pass
         return src_path
+    finally:
+        if temp.exists():
+            try: temp.unlink()
+            except Exception: pass
     return dst
 
 
