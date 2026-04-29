@@ -155,6 +155,28 @@ async def get_library_status() -> dict:
     return library_status()
 
 
+@app.get("/api/library/catalogue")
+async def get_library_catalogue() -> dict:
+    """Full catalogue + per-entry built/missing state, for the UI to render
+    upfront so the panel never looks empty."""
+    from mapng_ai.library_builder import CATALOGUE
+    from mapng_ai.library_builder.runner import target_glb
+    out = []
+    for e in CATALOGUE:
+        glb = target_glb(e)
+        out.append({
+            "slug": e.slug,
+            "category": e.category,
+            "type": e.type,
+            "prompt": e.prompt,
+            "footprint_m": list(e.footprint_m),
+            "levels": e.levels,
+            "built": glb.exists() and glb.stat().st_size > 0,
+            "size_bytes": glb.stat().st_size if glb.exists() else 0,
+        })
+    return {"entries": out}
+
+
 class LibraryBuildRequest(BaseModel):
     categories: list[str] | None = None     # None = all
 
