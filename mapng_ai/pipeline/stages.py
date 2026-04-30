@@ -178,11 +178,22 @@ async def stage_segment(ctx: JobContext, emit: Emit) -> None:
 async def stage_splat(ctx: JobContext, emit: Emit) -> None:
     assert ctx.class_map is not None
     ctx.splat = await asyncio.to_thread(build_splat, ctx.class_map, ctx.out_dir)
-    layers_payload = [
-        {"key": l.cls.key, "label": l.cls.label, "color": list(l.cls.color_rgb),
-         "coverage_pct": round(l.coverage_pct, 1), "source": l.source}
-        for l in ctx.splat.layers
-    ]
+    layers_payload = []
+    for l in ctx.splat.layers:
+        opacity_url = f"/api/jobs/{ctx.job_id}/files/opacity_{l.cls.key}.png"
+        diffuse_url = (f"/api/pbr/{l.cls.key}/diffuse" if l.source == "polyhaven" else None)
+        normal_url = (f"/api/pbr/{l.cls.key}/normal" if l.source == "polyhaven"
+                      and l.normal_path is not None else None)
+        layers_payload.append({
+            "key": l.cls.key,
+            "label": l.cls.label,
+            "color": list(l.cls.color_rgb),
+            "coverage_pct": round(l.coverage_pct, 1),
+            "source": l.source,
+            "opacity_url": opacity_url,
+            "diffuse_url": diffuse_url,
+            "normal_url": normal_url,
+        })
     ctx.artifacts["terrain_combined"] = (
         f"/api/jobs/{ctx.job_id}/files/{ctx.splat.combined_diffuse_path.name}"
     )

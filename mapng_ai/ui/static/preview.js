@@ -19,6 +19,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { createTerrainMaterial, applyTerrainLayers } from "/static/terrain_shader.js";
 
 const container = document.getElementById("preview");
 console.info("[preview] booting");
@@ -278,10 +279,13 @@ async function setHeightmap({ url, sideMeters, minM, maxM, segments = 256 }) {
   geo.rotateX(-Math.PI / 2);
   geo.computeVertexNormals();
 
-  const mat = new THREE.MeshStandardMaterial({
-    color: 0x9bab78,
-    roughness: 0.95,
-    metalness: 0.0,
+  // Fresh shader material every heightmap. The splat stage will populate
+  // textures into it via applyTerrainLayers().
+  const mat = createTerrainMaterial({
+    tileSize: 4.0,
+    fogColor: 0xc7d6e0,
+    fogNear: Math.max(800, sideMeters * 0.6),
+    fogFar:  Math.max(4000, sideMeters * 3.0),
   });
 
   if (state.terrainMesh) {
@@ -314,31 +318,21 @@ async function setHeightmap({ url, sideMeters, minM, maxM, segments = 256 }) {
   }
 }
 
-function setTerrainTexture(url, normalUrl) {
+async function setTerrainLayers(layers) {
   if (!state.terrainMesh) {
-    console.warn("[preview] setTerrainTexture before terrain mesh");
+    console.warn("[preview] setTerrainLayers before terrain mesh");
     return;
   }
-  console.info("[preview] setTerrainTexture", url, "normal:", normalUrl);
-  const loader = new THREE.TextureLoader();
-  loader.crossOrigin = "anonymous";
-  loader.load(url, (tex) => {
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.anisotropy = 8;
-    tex.flipY = true;
-    tex.needsUpdate = true;
-    state.terrainMesh.material.map = tex;
-    state.terrainMesh.material.color = new THREE.Color(0xffffff);
-    state.terrainMesh.material.needsUpdate = true;
-  }, undefined, (err) => console.error("[preview] diffuse load failed", err));
-  if (normalUrl) {
-    loader.load(normalUrl, (tex) => {
-      tex.flipY = true;
-      tex.needsUpdate = true;
-      state.terrainMesh.material.normalMap = tex;
-      state.terrainMesh.material.normalScale = new THREE.Vector2(1.5, 1.5);
-      state.terrainMesh.material.needsUpdate = true;
-    }, undefined, (err) => console.error("[preview] normal load failed", err));
+  console.info("[preview] setTerrainLayers:", layers.map(l => l.key).join(","));
+  // Sort by coverage descending — top 4 wins
+  const sorted = [...layers].sort((a, b) => b.coverage_pct - a.coverage_pct);
+  try {
+    const used = await applyTerrainLayers(state.terrainMesh.material, sorted, {
+      sunDir: state.sunLight ? state.sunLight.position.clone().normalize() : undefined,
+    });
+    console.info("[preview] terrain shader: %d layers active", used);
+  } catch (err) {
+    console.error("[preview] terrain shader load failed:", err);
   }
 }
 
@@ -680,6 +674,6 @@ function loadImage(url) {
 }
 
 window.MapNGPreview = {
-  reset, setHeightmap, setTerrainTexture, setBuildings, setFoliage, setRoads,
+  reset, setHeightmap, setTerrainLayers, setBuildings, setFoliage, setRoads,
   invalidateGlbCache,
 };

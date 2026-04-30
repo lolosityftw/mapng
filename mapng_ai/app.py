@@ -340,6 +340,22 @@ async def get_entry_glb(slug: str, quality: str = "original") -> FileResponse:
     )
 
 
+@app.get("/api/pbr/{class_key}/{map_kind}")
+async def get_pbr_map(class_key: str, map_kind: str) -> FileResponse:
+    """Serve a Poly Haven PBR map (diffuse / normal / roughness) for the
+    terrain shader. 404 if that class hasn't been downloaded."""
+    from mapng_ai.library_builder.terrain_pack import pbr_set
+    if map_kind not in ("diffuse", "normal", "roughness"):
+        raise HTTPException(400, f"map_kind must be diffuse|normal|roughness")
+    s = pbr_set(class_key)
+    p = getattr(s, map_kind, None)
+    if p is None or not p.exists():
+        raise HTTPException(404, f"no {map_kind} for {class_key}")
+    media = "image/jpeg" if p.suffix.lower() in (".jpg", ".jpeg") else "image/png"
+    return FileResponse(p, media_type=media,
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
 # ---- Library asset serving (used by /preview) -------------------------------
 @app.get("/api/asset")
 async def get_asset_by_relpath(path: str, quality: str | None = None) -> FileResponse:
