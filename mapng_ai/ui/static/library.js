@@ -202,6 +202,34 @@ function selectEntry(slug) {
   loadPreview(e);
   loadStats(e);
   loadPromptForEntry(slug);
+  loadEmbeddedTextures(slug);
+}
+
+async function loadEmbeddedTextures(slug) {
+  const block = document.getElementById("d-textures");
+  const gridEl = document.getElementById("d-textures-grid");
+  if (!block || !gridEl) return;
+  block.hidden = true;
+  gridEl.innerHTML = "";
+  try {
+    const r = await fetch(`/api/library/entries/${slug}/textures`);
+    const data = await r.json();
+    if (!data.exists || !data.textures?.length) return;
+    block.hidden = false;
+    const fmt = (n) => !n ? "—" : n < 1024 ** 2 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 ** 2).toFixed(1)} MB`;
+    gridEl.innerHTML = data.textures.map((t) => `
+      <div class="emb-cell">
+        <div class="preview"><img src="${t.url}?v=${t.size}" alt="${t.name}" loading="lazy"/></div>
+        <div class="info">
+          <strong title="${t.name}">${t.name.length > 18 ? t.name.slice(0, 18) + '…' : t.name}</strong>
+          <span class="dim">${t.width}×${t.height}</span>
+          <span> · ${fmt(t.size)}</span>
+        </div>
+      </div>
+    `).join("");
+  } catch (e) {
+    console.warn("textures fetch failed", e);
+  }
 }
 
 async function loadPromptForEntry(slug) {

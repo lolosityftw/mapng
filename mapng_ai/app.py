@@ -460,6 +460,88 @@ async def upload_entry_glb(slug: str, file: UploadFile = File(...)) -> dict:
     return {"slug": slug, "saved_bytes": len(body), "path": str(out)}
 
 
+@app.get("/api/library/entries/{slug}/textures")
+async def list_entry_textures(slug: str) -> dict:
+    """List the textures embedded in this entry's GLB (binary chunks)."""
+    from mapng_ai.library_builder import CATALOGUE
+    from mapng_ai.library_builder.runner import target_glb
+    from pygltflib import GLTF2
+    import io
+    from PIL import Image
+
+    entry = next((e for e in CATALOGUE if e.slug == slug), None)
+    if entry is None:
+        raise HTTPException(404, f"unknown slug: {slug}")
+    glb = target_glb(entry)
+    if not glb.exists():
+        return {"slug": slug, "textures": [], "exists": False}
+
+    def _scan() -> list[dict]:
+        gltf = GLTF2().load(glb)
+        images = gltf.images or []
+        blob = gltf.binary_blob() or b""
+        results = []
+        for i, img in enumerate(images):
+            if img.bufferView is None:
+                continue
+            bv = gltf.bufferViews[img.bufferView]
+            data = blob[bv.byteOffset or 0 : (bv.byteOffset or 0) + bv.byteLength]
+            mime = (img.mimeType or "image/png")
+            w = h = 0
+            try:
+                with Image.open(io.BytesIO(data)) as pil:
+                    w, h = pil.size
+            except Exception:
+                pass
+            results.append({
+                "index": i,
+                "name": img.name or f"image_{i}",
+                "mime": mime,
+                "size": len(data),
+                "width": w, "height": h,
+                "url": f"/api/library/entries/{slug}/textures/{i}",
+            })
+        return results
+
+    textures = await asyncio.to_thread(_scan)
+    return {"slug": slug, "exists": True, "textures": textures}
+
+
+@app.get("/api/library/entries/{slug}/textures/{idx}")
+async def get_entry_texture(slug: str, idx: int) -> Response:
+    """Extract one embedded image from the GLB and return it as bytes."""
+    from mapng_ai.library_builder import CATALOGUE
+    from mapng_ai.library_builder.runner import target_glb
+    from pygltflib import GLTF2
+
+    entry = next((e for e in CATALOGUE if e.slug == slug), None)
+    if entry is None:
+        raise HTTPException(404, f"unknown slug: {slug}")
+    glb = target_glb(entry)
+    if not glb.exists():
+        raise HTTPException(404, f"{slug} not yet generated")
+
+    def _extract() -> tuple[bytes, str]:
+        gltf = GLTF2().load(glb)
+        images = gltf.images or []
+        if idx < 0 or idx >= len(images):
+            raise IndexError(f"image index {idx} out of range")
+        img = images[idx]
+        if img.bufferView is None:
+            raise ValueError("image has no bufferView (external uri not supported)")
+        bv = gltf.bufferViews[img.bufferView]
+        blob = gltf.binary_blob() or b""
+        data = blob[bv.byteOffset or 0 : (bv.byteOffset or 0) + bv.byteLength]
+        return data, img.mimeType or "image/png"
+
+    try:
+        data, mime = await asyncio.to_thread(_extract)
+    except (IndexError, ValueError) as exc:
+        raise HTTPException(404, str(exc))
+    return Response(content=data, media_type=mime,
+                    headers={"Cache-Control": "public, max-age=3600"})
+
+
 @app.delete("/api/library/entries/{slug}")
 async def delete_entry(slug: str) -> dict:
     """Drop a cached GLB so the next build regenerates it."""
