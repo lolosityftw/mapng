@@ -548,6 +548,11 @@ async function setBuildings(buildings) {
 }
 
 // ---------------------------------------------------------------------------
+// Camera-distance threshold where tree GLB → billboard fallback kicks in.
+// Buildings stay full-mesh; trees are the high-count scene-killer.
+const TREE_GLB_RADIUS = 600;     // metres around the camera target
+const MAX_GLB_TREES = 250;       // cap GLB instances regardless of bucket
+
 async function setFoliage({ trees, hedges }) {
   if (!state.scene) return;
   console.info("[preview] setFoliage trees=%d hedges=%d", trees?.length ?? 0, hedges?.length ?? 0);
@@ -560,6 +565,47 @@ async function setFoliage({ trees, hedges }) {
   const group = new THREE.Group();
   state.scene.add(group);
   state.foliageGroup = group;
+
+  // Pick which trees become full GLBs (close to terrain centre) vs billboards
+  const cameraTarget = state.controls?.target || new THREE.Vector3();
+  const dist2 = (t) => {
+    const dx = t.x - cameraTarget.x;
+    const dy = -t.y - cameraTarget.z;     // BeamNG y → preview -z
+    return dx * dx + dy * dy;
+  };
+  const sortedTrees = (trees || []).slice().sort((a, b) => dist2(a) - dist2(b));
+  const glbTrees = sortedTrees
+    .filter((t) => Math.sqrt(dist2(t)) < TREE_GLB_RADIUS)
+    .slice(0, MAX_GLB_TREES);
+  const billboardTrees = sortedTrees.filter((t) => !glbTrees.includes(t));
+
+  // ---- Distant trees: instanced billboards (one quad each, lit cheaply) ----
+  if (billboardTrees.length) {
+    const quad = new THREE.PlaneGeometry(1, 1);
+    const billboardMat = new THREE.MeshLambertMaterial({
+      color: 0x3a6e2a, transparent: true, alphaTest: 0.4, depthWrite: false, side: THREE.DoubleSide,
+    });
+    const inst = new THREE.InstancedMesh(quad, billboardMat, billboardTrees.length);
+    inst.castShadow = false;
+    const m = new THREE.Matrix4(); const q = new THREE.Quaternion();
+    for (let i = 0; i < billboardTrees.length; i++) {
+      const t = billboardTrees[i];
+      const [, , sz] = t.scale;
+      // Vertical orientation: stand upright
+      q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -t.yaw);
+      m.compose(
+        new THREE.Vector3(t.x, t.z + sz / 2, -t.y),
+        q,
+        new THREE.Vector3(sz * 0.7, sz, 1),
+      );
+      inst.setMatrixAt(i, m);
+    }
+    inst.instanceMatrix.needsUpdate = true;
+    group.add(inst);
+  }
+
+  // Replace the input list so the GLB path below only handles close trees
+  trees = glbTrees;
 
   if (trees?.length) {
     // Bucket trees by shape path so each tree GLB loads once

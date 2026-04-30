@@ -172,7 +172,6 @@ generateBtn.addEventListener("click", async () => {
   stagesEl.innerHTML = "";
   document.getElementById("downloads").hidden = true;
   document.getElementById("download-list").innerHTML = "";
-  window._satelliteUsed = false;
   window.MapNGPreview?.reset?.();
   // Pick up any change made to the library's active quality before this run
   await refreshActiveQuality();
