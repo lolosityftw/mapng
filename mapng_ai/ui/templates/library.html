@@ -118,9 +118,13 @@
         <small class="hint">GPU texture estimate is uncompressed RGBA × image_count. Triangle count: <span id="d-tris">…</span></small>
       </div>
       <div class="preview-wrap">
-        <h3>3D preview</h3>
+        <div class="preview-head">
+          <h3>3D preview</h3>
+          <div id="quality-tabs" class="quality-tabs"></div>
+        </div>
         <div id="preview3d"></div>
-        <small class="hint">Drag to orbit · scroll to zoom · the mesh scale shown matches its catalogue footprint.</small>
+        <div id="preview-meta" class="preview-meta"></div>
+        <small class="hint">Drag to orbit · scroll to zoom · click a quality tab to swap the rendered mesh.</small>
       </div>
     </div>
   </section>

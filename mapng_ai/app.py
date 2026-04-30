@@ -317,19 +317,24 @@ async def delete_entry(slug: str) -> dict:
 
 
 @app.get("/api/library/entries/{slug}/glb")
-async def get_entry_glb(slug: str) -> FileResponse:
-    """Serve a cached GLB so the library page can preview it."""
+async def get_entry_glb(slug: str, quality: str = "original") -> FileResponse:
+    """Serve a cached GLB at the requested quality so /library can preview
+    each variant. `quality` defaults to 'original'."""
     from mapng_ai.library_builder import CATALOGUE
+    from mapng_ai.library_builder.optimise import QUALITY_PRESETS, optimise
     from mapng_ai.library_builder.runner import target_glb
 
     entry = next((e for e in CATALOGUE if e.slug == slug), None)
     if entry is None:
         raise HTTPException(404, f"unknown slug: {slug}")
+    if quality not in QUALITY_PRESETS:
+        raise HTTPException(400, f"unknown quality: {quality}")
     glb = target_glb(entry)
     if not glb.exists():
         raise HTTPException(404, f"{slug} not yet generated")
+    served = await asyncio.to_thread(optimise, glb, quality)
     return FileResponse(
-        glb,
+        served,
         media_type="model/gltf-binary",
         headers={"Cache-Control": "public, max-age=3600"},
     )

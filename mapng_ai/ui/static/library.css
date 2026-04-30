@@ -138,11 +138,45 @@ tr.fail    .c-icon span { color: #f85149; }
 
 .d-actions { display: flex; gap: 10px; margin-bottom: 18px; }
 
-.preview-wrap h3 { margin: 0 0 8px; font-size: 12px; font-weight: 600; color: #adbac7; text-transform: uppercase; letter-spacing: 0.5px; }
+.preview-wrap h3 { margin: 0; font-size: 12px; font-weight: 600; color: #adbac7; text-transform: uppercase; letter-spacing: 0.5px; }
+.preview-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px; gap: 12px; flex-wrap: wrap;
+}
+.quality-tabs { display: flex; gap: 4px; }
+.quality-tabs button {
+  background: #14171c; color: #7d8590; border: 1px solid #2a2f37;
+  padding: 4px 10px; border-radius: 4px;
+  font-family: ui-monospace, Consolas, monospace; font-size: 11px;
+  font-weight: 600; cursor: pointer; position: relative;
+}
+.quality-tabs button:not(:disabled):hover { background: #1f2630; color: #adbac7; }
+.quality-tabs button.active {
+  background: #1f2630; color: #58a6ff; border-color: #2a3a4a;
+}
+.quality-tabs button.missing {
+  color: #545c66; border-style: dashed;
+}
+.quality-tabs button.missing::after {
+  content: "○"; margin-left: 4px; font-size: 9px; vertical-align: super;
+}
+.quality-tabs button.baked::after {
+  content: "✓"; margin-left: 4px; font-size: 10px; vertical-align: super; color: #3fb950;
+}
+.quality-tabs button.active::after { color: #58a6ff; }
+.quality-tabs button:disabled { opacity: 0.4; cursor: not-allowed; }
+
 #preview3d {
   width: 100%; height: 380px; background: #0d1117;
   border-radius: 6px; position: relative; overflow: hidden;
 }
+.preview-meta {
+  display: flex; gap: 16px; font-size: 11px; color: #7d8590;
+  font-family: ui-monospace, Consolas, monospace;
+  padding: 6px 0 0; min-height: 18px;
+}
+.preview-meta strong { color: #adbac7; font-weight: 500; }
+.preview-meta .pill { color: #58a6ff; }
 .preview-wrap .hint { color: #6e7681; font-size: 11px; margin-top: 6px; display: block; }
 
 .stats-block { margin-top: 18px; }

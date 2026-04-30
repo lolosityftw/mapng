@@ -14,6 +14,8 @@ const state = {
   filter: { category: "", type: "", built: "", search: "" },
   sort: "natural",
   selectedSlug: null,
+  selectedQuality: "10k",   // which baked variant the 3D viewer shows
+  selectedStats: null,      // last loaded /stats payload for the selection
   liveJob: null,        // EventSource of an in-flight build job
 };
 
@@ -52,7 +54,12 @@ const els = {
     delete: document.getElementById("d-delete"),
   },
   preview3d: document.getElementById("preview3d"),
+  qualityTabs: document.getElementById("quality-tabs"),
+  previewMeta: document.getElementById("preview-meta"),
 };
+
+// Order matters — display this left-to-right
+const PREVIEW_QUALITIES = ["1.5k", "5k", "10k", "50k", "100k", "original"];
 
 // ---------------------------------------------------------------------------
 // Catalogue load + render
@@ -194,13 +201,28 @@ async function loadStats(e) {
   const block = document.getElementById("d-stats");
   const body = document.getElementById("d-stats-body");
   const trisEl = document.getElementById("d-tris");
-  if (!e.built) { block.hidden = true; return; }
+  if (!e.built) {
+    block.hidden = true;
+    state.selectedStats = null;
+    renderQualityTabs(null);
+    updatePreviewMeta();
+    return;
+  }
   block.hidden = false;
   body.innerHTML = `<tr><td colspan="4">loading…</td></tr>`;
   try {
     const r = await fetch(`/api/library/entries/${e.slug}/stats`);
     const data = await r.json();
-    if (!data.exists) { block.hidden = true; return; }
+    if (!data.exists) {
+      block.hidden = true;
+      state.selectedStats = null;
+      renderQualityTabs(null);
+      updatePreviewMeta();
+      return;
+    }
+    state.selectedStats = data;
+    renderQualityTabs(data);
+    updatePreviewMeta();
     const order = ["original", "100k", "50k", "10k", "5k", "1.5k"];
     const fmt = (n) => n < 1024 ? `${n} B`
                        : n < 1024 ** 2 ? `${(n / 1024).toFixed(1)} KB`
@@ -322,16 +344,63 @@ const preview = (() => {
 
 const gltfLoader = new GLTFLoader();
 
-async function loadPreview(e) {
+function fmtBytesQ(n) {
+  if (!n) return "";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 ** 2).toFixed(1)} MB`;
+}
+
+function renderQualityTabs(stats) {
+  if (!els.qualityTabs) return;
+  els.qualityTabs.innerHTML = "";
+  for (const q of PREVIEW_QUALITIES) {
+    const meta = stats?.qualities?.[q];
+    const baked = !!meta?.exists;
+    const btn = document.createElement("button");
+    btn.dataset.quality = q;
+    btn.textContent = q;
+    if (q === state.selectedQuality) btn.classList.add("active");
+    btn.classList.add(baked ? "baked" : "missing");
+    btn.title = baked
+      ? `baked · ${meta.triangle_count?.toLocaleString() ?? "?"} tris · ${fmtBytesQ(meta.file_size)}`
+      : `not yet baked — click to bake on demand`;
+    btn.addEventListener("click", () => {
+      state.selectedQuality = q;
+      renderQualityTabs(state.selectedStats);
+      const e = state.entries.find((x) => x.slug === state.selectedSlug);
+      if (e) loadPreview(e, q);
+      updatePreviewMeta();
+    });
+    els.qualityTabs.appendChild(btn);
+  }
+}
+
+function updatePreviewMeta() {
+  if (!els.previewMeta) return;
+  const m = state.selectedStats?.qualities?.[state.selectedQuality];
+  if (!m || !m.exists) {
+    els.previewMeta.innerHTML = `<span class="pill">${state.selectedQuality}</span> <span>(baking on demand…)</span>`;
+    return;
+  }
+  els.previewMeta.innerHTML =
+    `<span class="pill">${state.selectedQuality}</span>` +
+    `<span><strong>${m.triangle_count?.toLocaleString() ?? "?"}</strong> tris</span>` +
+    `<span><strong>${fmtBytesQ(m.file_size)}</strong> file</span>` +
+    `<span>${m.image_max_dim || "?"} px tex</span>`;
+}
+
+async function loadPreview(e, quality) {
   if (!e.built) {
     preview.showMessage("Mesh not generated yet — click Build to create it via Meshy.");
     return;
   }
-  preview.showMessage("loading…");
+  const q = quality || state.selectedQuality || "10k";
+  preview.showMessage(`loading ${q}…`);
   try {
     await new Promise((resolve, reject) => {
       gltfLoader.load(
-        `/api/library/entries/${e.slug}/glb?v=${e.size_bytes}`,
+        `/api/library/entries/${e.slug}/glb?quality=${encodeURIComponent(q)}&v=${e.size_bytes}`,
         (gltf) => { preview.clearMessage(); preview.setModel(gltf.scene); resolve(); },
         undefined,
         (err) => reject(err),
