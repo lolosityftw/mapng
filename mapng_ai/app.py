@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -305,6 +305,73 @@ async def build_single_entry(req: SingleBuildRequest) -> dict:
 
     asyncio.create_task(_run())
     return {"job_id": job_id}
+
+
+class PromptOverrideRequest(BaseModel):
+    prompt: str | None = None
+
+
+@app.get("/api/library/entries/{slug}/prompt")
+async def get_entry_prompt(slug: str) -> dict:
+    """Return current effective prompt + whether it's an override."""
+    from mapng_ai.library_builder import CATALOGUE
+    from mapng_ai.library_builder.catalogue import get_prompt_override
+    entry = next((e for e in CATALOGUE if e.slug == slug), None)
+    if entry is None:
+        raise HTTPException(404, f"unknown slug: {slug}")
+    override = get_prompt_override(slug)
+    return {
+        "slug": slug,
+        "default": entry.prompt,
+        "override": override,
+        "effective": override or entry.prompt,
+    }
+
+
+@app.post("/api/library/entries/{slug}/prompt")
+async def set_entry_prompt(slug: str, req: PromptOverrideRequest) -> dict:
+    from mapng_ai.library_builder import CATALOGUE
+    from mapng_ai.library_builder.catalogue import set_prompt_override, get_prompt_override
+    entry = next((e for e in CATALOGUE if e.slug == slug), None)
+    if entry is None:
+        raise HTTPException(404, f"unknown slug: {slug}")
+    p = (req.prompt or "").strip() or None
+    # Don't store the override if it equals the default
+    if p == entry.prompt:
+        p = None
+    set_prompt_override(slug, p)
+    return {"slug": slug, "override": p, "effective": p or entry.prompt}
+
+
+@app.post("/api/library/entries/{slug}/upload")
+async def upload_entry_glb(slug: str, file: UploadFile = File(...)) -> dict:
+    """Replace this entry's GLB with a user-supplied file. Saves to
+    assets/buildings|trees|vehicles/<type>/<slug>.glb."""
+    from mapng_ai.library_builder import CATALOGUE
+    from mapng_ai.library_builder.runner import target_glb, target_dir
+    entry = next((e for e in CATALOGUE if e.slug == slug), None)
+    if entry is None:
+        raise HTTPException(404, f"unknown slug: {slug}")
+    if not file.filename or not file.filename.lower().endswith(".glb"):
+        raise HTTPException(400, "expected a .glb file")
+
+    target_dir(entry).mkdir(parents=True, exist_ok=True)
+    out = target_glb(entry)
+    body = await file.read()
+    if not body:
+        raise HTTPException(400, "empty file")
+    out.write_bytes(body)
+
+    # Drop optimised variants — they're stale now
+    from mapng_ai.library_builder.optimise import _OPT_CACHE
+    import shutil
+    for q_dir in _OPT_CACHE.iterdir() if _OPT_CACHE.exists() else []:
+        cached = q_dir / out.name
+        if cached.exists():
+            try: cached.unlink()
+            except Exception: pass
+
+    return {"slug": slug, "saved_bytes": len(body), "path": str(out)}
 
 
 @app.delete("/api/library/entries/{slug}")

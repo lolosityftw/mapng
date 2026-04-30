@@ -136,7 +136,36 @@ tr.fail    .c-icon span { color: #f85149; }
 .meta-grid span { color: #e6e8eb; font-family: ui-monospace, Consolas, monospace; }
 .meta-grid .full span { white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
 
-.d-actions { display: flex; gap: 10px; margin-bottom: 18px; }
+.d-actions { display: flex; gap: 10px; margin-bottom: 18px; flex-wrap: wrap; }
+
+.prompt-block, .upload-block {
+  margin-bottom: 16px; padding: 12px 14px;
+  background: #14171c; border: 1px solid #2a2f37; border-radius: 6px;
+}
+.prompt-block label, .upload-block label {
+  display: block; font-size: 11px; color: #adbac7; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;
+}
+.prompt-block label small, .upload-block label small {
+  font-weight: 400; color: #6e7681; text-transform: none; letter-spacing: 0; margin-left: 6px;
+}
+.prompt-block textarea {
+  width: 100%; box-sizing: border-box;
+  background: #0d1117; color: #e6e8eb; border: 1px solid #2a2f37;
+  font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+  padding: 8px; border-radius: 4px; resize: vertical;
+}
+.prompt-actions { display: flex; gap: 8px; margin-top: 8px; }
+.prompt-actions button { font-size: 11px; padding: 4px 12px; }
+
+.drop-zone {
+  border: 2px dashed #2a3a4a; border-radius: 6px;
+  padding: 16px; text-align: center; color: #6e7681;
+  font-size: 12px; cursor: pointer; transition: all 0.15s;
+}
+.drop-zone:hover { border-color: #58a6ff; color: #adbac7; }
+.drop-zone.dragover { border-color: #2ea043; background: #14201a; color: #3fb950; }
+.drop-zone.uploading { color: #d29922; }
 
 .preview-wrap h3 { margin: 0; font-size: 12px; font-weight: 600; color: #adbac7; text-transform: uppercase; letter-spacing: 0.5px; }
 .preview-head {

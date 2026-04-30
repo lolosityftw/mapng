@@ -53,6 +53,11 @@ const els = {
     regenerate: document.getElementById("d-regenerate"),
     bake: document.getElementById("d-bake"),
     delete: document.getElementById("d-delete"),
+    promptOverride: document.getElementById("d-prompt-override"),
+    promptSave: document.getElementById("d-prompt-save"),
+    promptClear: document.getElementById("d-prompt-clear"),
+    drop: document.getElementById("d-drop"),
+    file: document.getElementById("d-file"),
   },
   preview3d: document.getElementById("preview3d"),
   qualityTabs: document.getElementById("quality-tabs"),
@@ -196,6 +201,19 @@ function selectEntry(slug) {
   els.d.delete.hidden = !e.built;
   loadPreview(e);
   loadStats(e);
+  loadPromptForEntry(slug);
+}
+
+async function loadPromptForEntry(slug) {
+  if (!els.d.promptOverride) return;
+  els.d.promptOverride.value = "";
+  els.d.promptOverride.placeholder = "loading…";
+  try {
+    const r = await fetch(`/api/library/entries/${slug}/prompt`);
+    const data = await r.json();
+    els.d.promptOverride.placeholder = data.default || "";
+    els.d.promptOverride.value = data.override || "";
+  } catch (e) { els.d.promptOverride.placeholder = "(failed to load prompt)"; }
 }
 
 async function loadStats(e) {
@@ -679,6 +697,74 @@ els.d.regenerate.addEventListener("click", () => {
     buildOne(state.selectedSlug, true);
   }
 });
+// ---- Prompt override + GLB upload (per-entry, detail pane) -----------------
+els.d.promptSave?.addEventListener("click", async () => {
+  const slug = state.selectedSlug;
+  if (!slug) return;
+  await fetch(`/api/library/entries/${slug}/prompt`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: els.d.promptOverride.value }),
+  });
+});
+els.d.promptClear?.addEventListener("click", async () => {
+  const slug = state.selectedSlug;
+  if (!slug) return;
+  await fetch(`/api/library/entries/${slug}/prompt`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: null }),
+  });
+  loadPromptForEntry(slug);
+});
+
+async function uploadGlb(file) {
+  const slug = state.selectedSlug;
+  if (!slug || !file) return;
+  if (!file.name.toLowerCase().endsWith(".glb")) {
+    alert("Please drop a .glb file");
+    return;
+  }
+  els.d.drop.classList.add("uploading");
+  els.d.drop.textContent = `uploading ${file.name}…`;
+  try {
+    const fd = new FormData();
+    fd.append("file", file);
+    const r = await fetch(`/api/library/entries/${slug}/upload`, { method: "POST", body: fd });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    els.d.drop.classList.remove("uploading");
+    els.d.drop.textContent = `replaced (${(data.saved_bytes / 1e6).toFixed(1)} MB) — reloading…`;
+    // Mark built locally + refresh stats/preview
+    const e = state.entries.find((x) => x.slug === slug);
+    if (e) { e.built = true; e.size_bytes = data.saved_bytes; }
+    renderTable();
+    selectEntry(slug);
+    setTimeout(() => { els.d.drop.textContent = "drop a .glb here or click to choose"; }, 2500);
+  } catch (err) {
+    els.d.drop.classList.remove("uploading");
+    els.d.drop.textContent = `upload failed: ${err}`;
+  }
+}
+
+els.d.drop?.addEventListener("click", () => els.d.file.click());
+els.d.file?.addEventListener("change", () => {
+  if (els.d.file.files[0]) uploadGlb(els.d.file.files[0]);
+  els.d.file.value = "";
+});
+els.d.drop?.addEventListener("dragover", (ev) => {
+  ev.preventDefault();
+  els.d.drop.classList.add("dragover");
+});
+els.d.drop?.addEventListener("dragleave", () => {
+  els.d.drop.classList.remove("dragover");
+});
+els.d.drop?.addEventListener("drop", (ev) => {
+  ev.preventDefault();
+  els.d.drop.classList.remove("dragover");
+  if (ev.dataTransfer.files?.[0]) uploadGlb(ev.dataTransfer.files[0]);
+});
+
 els.d.bake.addEventListener("click", async () => {
   const slug = state.selectedSlug;
   if (!slug) return;

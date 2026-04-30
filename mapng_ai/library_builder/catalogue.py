@@ -94,3 +94,46 @@ def by_category(category: str) -> list[CatalogueEntry]:
 
 def total_count() -> int:
     return len(CATALOGUE)
+
+
+# ---------------------------------------------------------------------------
+# Per-slug prompt overrides — persisted in mapng_ai/cache/prompt_overrides.json
+# ---------------------------------------------------------------------------
+import json
+from pathlib import Path
+from mapng_ai import config
+
+
+def _overrides_path() -> Path:
+    return config.CACHE_DIR / "prompt_overrides.json"
+
+
+def get_prompt_override(slug: str) -> str | None:
+    p = _overrides_path()
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8")).get(slug)
+    except Exception:
+        return None
+
+
+def set_prompt_override(slug: str, prompt: str | None) -> None:
+    p = _overrides_path()
+    data = {}
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    if prompt:
+        data[slug] = prompt
+    else:
+        data.pop(slug, None)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def effective_prompt(entry: CatalogueEntry) -> str:
+    """The prompt the runner will actually send to Meshy — override wins."""
+    return get_prompt_override(entry.slug) or entry.prompt

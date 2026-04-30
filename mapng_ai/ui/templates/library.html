@@ -113,6 +113,21 @@
         <button id="d-delete" class="danger">Delete cache</button>
       </div>
 
+      <div class="prompt-block">
+        <label>Prompt override <small>(blank = use catalogue default)</small></label>
+        <textarea id="d-prompt-override" rows="3" placeholder="Override the Meshy prompt for this entry…"></textarea>
+        <div class="prompt-actions">
+          <button id="d-prompt-save" class="ghost">Save override</button>
+          <button id="d-prompt-clear" class="ghost">Reset to default</button>
+        </div>
+      </div>
+
+      <div class="upload-block">
+        <label>Replace mesh <small>(drop or click — .glb only)</small></label>
+        <div id="d-drop" class="drop-zone">drop a .glb here or click to choose</div>
+        <input id="d-file" type="file" accept=".glb" hidden />
+      </div>
+
       <div id="d-stats" class="stats-block" hidden>
         <h3>Mesh stats</h3>
         <table class="stats-table">

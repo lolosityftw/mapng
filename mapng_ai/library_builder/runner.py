@@ -69,9 +69,10 @@ async def _gen_one(entry: CatalogueEntry, engine: MeshyEngine, sem: asyncio.Sema
         await emit("entry:start", {"slug": entry.slug, "category": entry.category,
                                    "type": entry.type, "prompt": entry.prompt})
 
+    from mapng_ai.library_builder.catalogue import effective_prompt
     async with sem:
         path = await engine.generate(
-            entry.prompt,
+            effective_prompt(entry),
             seed=hash(entry.slug) & 0xFFFFFFFF,
             target_polycount=getattr(entry, "target_polycount", None),
         )
