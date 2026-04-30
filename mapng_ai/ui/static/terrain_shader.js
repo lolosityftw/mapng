@@ -24,7 +24,6 @@ const VERT = `
 `;
 
 const FRAG = `
-  #extension GL_OES_standard_derivatives : enable
   precision highp float;
   varying vec2 vUv;
   varying vec3 vWorldPos;
@@ -111,9 +110,10 @@ const FRAG = `
     // gives real per-fragment hill shading from the displaced heightmap.
     vec3 dposX = dFdx(vWorldPos);
     vec3 dposY = dFdy(vWorldPos);
-    vec3 faceN = normalize(cross(dposY, dposX));
-    if (faceN.y < 0.0) faceN = -faceN;        // ensure pointing up
-
+    vec3 cx = cross(dposY, dposX);
+    float cxLen = length(cx);
+    vec3 faceN = cxLen > 1e-6 ? cx / cxLen : vec3(0.0, 1.0, 0.0);
+    if (faceN.y < 0.0) faceN = -faceN;
     vec3 N = normalize(faceN + vec3(nLocal.x, 0.0, nLocal.y) * 0.6);
     vec3 L = normalize(sunDir);
     float lambert = max(dot(N, L), 0.0);
@@ -161,6 +161,7 @@ export function createTerrainMaterial({ tileSize = 4.0, fogColor = 0xc7d6e0, fog
   const mat = new THREE.ShaderMaterial({
     vertexShader: VERT,
     fragmentShader: FRAG,
+    extensions: { derivatives: true },
     uniforms: {
       opacityMaps:   { value: blank4 },
       diffuseMaps:   { value: blank4 },
