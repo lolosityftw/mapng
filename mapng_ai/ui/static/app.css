@@ -145,6 +145,26 @@ button:not(:disabled):hover { background: #3fb950; }
 }
 .scene-size strong { color: #adbac7; font-weight: 500; }
 
+.grass-controls {
+  margin-top: 8px; padding: 6px 10px;
+  background: #14171c; border: 1px solid #2a2f37; border-radius: 4px;
+  font-size: 11px; color: #adbac7;
+}
+.grass-controls summary { cursor: pointer; font-weight: 600; user-select: none; }
+.grass-controls .slider-row {
+  display: grid; grid-template-columns: 1fr 1fr 1fr auto;
+  gap: 8px; margin-top: 8px; align-items: center;
+}
+.grass-controls label {
+  display: flex; flex-direction: column; gap: 3px;
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: #6e7681;
+}
+.grass-controls input[type=range] { width: 100%; }
+.grass-controls span {
+  font-family: ui-monospace, Consolas, monospace; font-size: 10px; color: #58a6ff;
+}
+.grass-controls button.ghost { font-size: 10px; padding: 3px 8px; }
+
 #preview { flex: 1; min-height: 300px; background: #0d1117; border-radius: 4px; position: relative; }
 .hint { color: #545c66; font-size: 11px; margin-top: 8px; }
 

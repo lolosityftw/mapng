@@ -314,6 +314,9 @@ async function setHeightmap({ url, sideMeters, minM, maxM, segments = 256 }) {
   mesh.receiveShadow = true;
   state.scene.add(mesh);
   state.terrainMesh = mesh;
+  // Expose to app.js so the grass-tint sliders can edit uniforms live.
+  window._terrainMaterial = mat;
+  window._mapngApplyGrass?.();
 
   if (state.controls && state.camera) {
     const dist = sideMeters * 1.3;

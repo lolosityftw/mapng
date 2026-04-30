@@ -45,6 +45,12 @@ const FRAG = `
   uniform float fogFar;
   uniform float terrainHalf;         // half-side metres, for edge fade
 
+  // User-adjustable tint controls (set live from UI sliders)
+  uniform vec3 grassTint;            // RGB multiplier on the green-class layers
+  uniform float grassSaturation;     // 1.0 = identity, >1 = boost saturation
+  uniform float grassBrightness;     // 1.0 = identity
+  uniform vec4 grassLayerMask;       // 1.0 per slot if that layer is grass-like
+
   // Cheap hash → noise for macro variation
   float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
   float vnoise(vec2 p) {
@@ -64,23 +70,30 @@ const FRAG = `
     return texture2D(maps[3], uv);
   }
 
-  // Anti-tile sampler: samples a tile at TWO different scales+offsets and
-  // blends them by low-frequency macro noise, additionally rotating the
-  // primary UV by a discrete 4-bin angle per ~80 m macro cell. The visible
-  // result: no obvious tile boundary because the pattern shifts gradually
-  // across the terrain instead of repeating identically every tile.
+  // Anti-tile sampler. Three samples at different scales/rotations/offsets
+  // blended by overlapping low-frequency noise weights — eliminates the
+  // visible cell boundaries that discrete rotation produced.
   vec4 sampleTile(int i, sampler2D maps[4], vec2 worldUV, vec2 worldXZ) {
-    // Coarse rotation: 0/90/180/270 degrees per macro cell (~80 m).
-    float rotIdx = floor(vnoise(worldXZ * 0.012) * 4.0);
-    float a = rotIdx * 1.5708;     // π/2 increments
-    float c = cos(a), s = sin(a);
-    mat2 R = mat2(c, -s, s, c);
-    vec2 uvA = R * worldUV;
-    vec2 uvB = worldUV * 0.43 + vec2(13.7, 23.1);
+    // Continuous (not discrete) per-fragment rotation — no hard cell seams.
+    float a1 = vnoise(worldXZ * 0.014) * 6.2832;       // 0..2π smooth
+    float a2 = vnoise(worldXZ * 0.022 + 17.3) * 6.2832;
+    float a3 = vnoise(worldXZ * 0.018 + 41.7) * 6.2832;
+    float c1 = cos(a1), s1 = sin(a1);
+    float c2 = cos(a2), s2 = sin(a2);
+    float c3 = cos(a3), s3 = sin(a3);
+    vec2 uvA = mat2(c1, -s1, s1, c1) * worldUV;
+    vec2 uvB = mat2(c2, -s2, s2, c2) * (worldUV * 0.57 + vec2(11.1, 27.3));
+    vec2 uvC = mat2(c3, -s3, s3, c3) * (worldUV * 1.33 + vec2(31.7, 5.9));
     vec4 dA = sampleLayer(i, maps, uvA);
     vec4 dB = sampleLayer(i, maps, uvB);
-    float m = smoothstep(0.35, 0.65, vnoise(worldXZ * 0.025));
-    return mix(dA, dB, m);
+    vec4 dC = sampleLayer(i, maps, uvC);
+    // Three weights from independent low-freq noise; normalised so they
+    // sum to 1 → no banding, smooth blend.
+    float w1 = vnoise(worldXZ * 0.010);
+    float w2 = vnoise(worldXZ * 0.013 + 7.7);
+    float w3 = vnoise(worldXZ * 0.017 + 23.4);
+    float wsum = max(w1 + w2 + w3, 1e-3);
+    return (dA * w1 + dB * w2 + dC * w3) / wsum;
   }
 
   void main() {
@@ -98,6 +111,18 @@ const FRAG = `
       if (a <= 0.001) continue;
       vec3 d = sampleTile(i, diffuseMaps, worldUV, vWorldPos.xz).rgb;
       vec3 n = sampleTile(i, normalMaps,  worldUV, vWorldPos.xz).rgb * 2.0 - 1.0;
+      // Apply user grass tint to layers flagged as grass via grassLayerMask
+      // (e.g. pasture and lawn). Saturation boost via grey-vs-colour mix.
+      float gm = 0.0;
+      if (i == 0) gm = grassLayerMask.x;
+      else if (i == 1) gm = grassLayerMask.y;
+      else if (i == 2) gm = grassLayerMask.z;
+      else gm = grassLayerMask.w;
+      if (gm > 0.5) {
+        d *= grassTint * grassBrightness;
+        float grey = dot(d, vec3(0.299, 0.587, 0.114));
+        d = mix(vec3(grey), d, grassSaturation);
+      }
       albedo += d * a;
       nLocal += n * a;
       total += a;
@@ -197,6 +222,11 @@ export function createTerrainMaterial({ tileSize = 4.0, fogColor = 0xc7d6e0, fog
       fogNear:       { value: fogNear },
       fogFar:        { value: fogFar },
       terrainHalf:   { value: terrainHalf },
+      // Adjustable grass tint (settable from main page UI)
+      grassTint:       { value: new THREE.Color(0.65, 1.20, 0.55) },  // strong green push
+      grassSaturation: { value: 1.30 },
+      grassBrightness: { value: 1.10 },
+      grassLayerMask:  { value: new THREE.Vector4(0, 0, 0, 0) },
     },
   });
   mat.userData.tickTime = (dt) => {
@@ -218,6 +248,16 @@ export async function applyTerrainLayers(material, layers, { sunDir } = {}) {
   const usable = layers.filter((l) => l.opacityUrl && l.diffuseUrl).slice(0, 4);
   const waterIdx = usable.findIndex((l) => l.key === "water");
   material.uniforms.waterLayerIndex.value = waterIdx;
+  // Flag the grass-like classes so the tint uniforms only affect them.
+  const GRASS_KEYS = new Set(["pasture", "lawn"]);
+  const mask = new THREE.Vector4(0, 0, 0, 0);
+  for (let i = 0; i < usable.length && i < 4; i++) {
+    if (GRASS_KEYS.has(usable[i].key)) {
+      const k = ["x", "y", "z", "w"][i];
+      mask[k] = 1.0;
+    }
+  }
+  material.uniforms.grassLayerMask.value = mask;
   const loader = new THREE.TextureLoader();
   loader.crossOrigin = "anonymous";
 

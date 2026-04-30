@@ -106,6 +106,74 @@ document.getElementById("preset")?.addEventListener("change", (ev) => {
   if (ev.target.value) applyPreset(ev.target.value);
 });
 
+// ---- Grass tint sliders -----------------------------------------------------
+const grassHueIn = document.getElementById("grass-hue");
+const grassSatIn = document.getElementById("grass-sat");
+const grassBriIn = document.getElementById("grass-bri");
+const grassHueV = document.getElementById("grass-hue-v");
+const grassSatV = document.getElementById("grass-sat-v");
+const grassBriV = document.getElementById("grass-bri-v");
+const grassReset = document.getElementById("grass-reset");
+
+const GRASS_DEFAULTS = { hue: 0, sat: 1.30, bri: 1.10 };
+function _loadGrass() {
+  try {
+    const s = JSON.parse(localStorage.getItem("mapng_grass") || "{}");
+    return { ...GRASS_DEFAULTS, ...s };
+  } catch { return { ...GRASS_DEFAULTS }; }
+}
+function _saveGrass(g) {
+  try { localStorage.setItem("mapng_grass", JSON.stringify(g)); } catch {}
+}
+// Hue rotation maps to an RGB tint multiplier centred on green. Hue=0 means
+// neutral green tint (matches the shader default 0.65/1.20/0.55).
+function _hueToTint(hueDeg) {
+  // Reference green tint at hue=0
+  const base = [0.65, 1.20, 0.55];
+  // Shift slightly: positive hue → bluer, negative → yellower
+  const r = base[0] + hueDeg * -0.004;
+  const g = base[1] + hueDeg * 0.002;
+  const b = base[2] + hueDeg * 0.005;
+  return [Math.max(0, r), Math.max(0, g), Math.max(0, b)];
+}
+function applyGrass(g) {
+  const m = window._terrainMaterial;
+  if (!m) return;
+  const [r, gn, b] = _hueToTint(g.hue);
+  m.uniforms.grassTint.value.setRGB(r, gn, b);
+  m.uniforms.grassSaturation.value = g.sat;
+  m.uniforms.grassBrightness.value = g.bri;
+  if (grassHueV) grassHueV.textContent = `${g.hue}°`;
+  if (grassSatV) grassSatV.textContent = g.sat.toFixed(2);
+  if (grassBriV) grassBriV.textContent = g.bri.toFixed(2);
+}
+function _readSliders() {
+  const g = _loadGrass();
+  if (grassHueIn) grassHueIn.value = g.hue;
+  if (grassSatIn) grassSatIn.value = g.sat;
+  if (grassBriIn) grassBriIn.value = g.bri;
+  applyGrass(g);
+}
+[grassHueIn, grassSatIn, grassBriIn].forEach((el) => {
+  el?.addEventListener("input", () => {
+    const g = {
+      hue: parseFloat(grassHueIn.value),
+      sat: parseFloat(grassSatIn.value),
+      bri: parseFloat(grassBriIn.value),
+    };
+    _saveGrass(g);
+    applyGrass(g);
+  });
+});
+grassReset?.addEventListener("click", () => {
+  _saveGrass(GRASS_DEFAULTS);
+  _readSliders();
+});
+// Reload sliders + reapply whenever a new pipeline run replaces the terrain
+// (the material changes per setHeightmap, so the tint must be reapplied).
+const _origSetHeightmap = () => null;     // placeholder — wire below
+window._mapngApplyGrass = _readSliders;
+
 // ---- Fullscreen preview -----------------------------------------------------
 const previewPane = document.getElementById("preview-pane");
 const fsBtn = document.getElementById("preview-fullscreen");
