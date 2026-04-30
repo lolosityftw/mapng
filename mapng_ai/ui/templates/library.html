@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>MapNG-AI · Library</title>
+<title>MapNG-AI · Asset Browser</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <link rel="stylesheet" href="/static/library.css?v=__BUILD__" />
 </head>
@@ -10,7 +10,7 @@
 
 <header>
   <div class="header-left">
-    <h1>Region Pack Library</h1>
+    <h1>Asset Browser</h1>
     <span class="region-pill">Rural Ireland</span>
   </div>
   <div class="header-right">
@@ -64,15 +64,23 @@
       </select>
     </label>
     <button id="build-missing" class="primary">Build missing</button>
-    <button id="build-all" class="ghost">Re-build all</button>
+    <button id="build-all" class="ghost">Generate all <span id="build-all-count"></span></button>
     <button id="bake-active" class="primary" title="Pre-bake just the currently selected active quality for every built entry">Pre-bake active quality</button>
     <button id="bake-all" class="ghost" title="Pre-bake every quality variant for every built entry — slow but lets you switch instantly later">Bake all qualities</button>
     <button id="terrain-pack" class="ghost" title="Download CC0 PBR ground textures from Poly Haven">Terrain PBR pack</button>
   </div>
   <div class="actions secondary">
-    <label class="active-quality" title="Override the catalogue's per-entry target_polycount. Set 0 to use catalogue defaults. Higher = more detail + more credits.">
+    <label class="active-quality" title="Caps Meshy's target_polycount for every generation. Lower = simpler meshes + cleaner topology + faster bake.">
       <span>Meshy max polycount</span>
-      <input id="meshy-polycount" type="number" min="0" step="500" value="10000" style="width:90px" />
+      <select id="meshy-polycount">
+        <option value="1500">1.5K · ultra low (silhouette only)</option>
+        <option value="2500">2.5K · low (game ready)</option>
+        <option value="5000" selected>5K · medium (default for buildings)</option>
+        <option value="7500">7.5K · medium-high</option>
+        <option value="10000">10K · high (background hero)</option>
+        <option value="15000">15K · very high (foreground hero)</option>
+        <option value="20000">20K · max (close inspection)</option>
+      </select>
     </label>
   </div>
 </section>

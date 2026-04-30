@@ -88,7 +88,7 @@ def get_meshy_max_polycount() -> int:
             return max(0, int(_MESHY_POLYCOUNT_FILE.read_text(encoding="utf-8").strip()))
         except Exception:
             pass
-    return 10_000
+    return 5_000
 
 
 def set_meshy_max_polycount(n: int) -> int:

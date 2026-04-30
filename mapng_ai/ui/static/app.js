@@ -27,7 +27,7 @@ async function refreshLibStatus() {
     if (!r.ok) throw new Error(r.statusText);
     const s = await r.json();
     const built = (s.totals.building || 0) + (s.totals.tree || 0) + (s.totals.vehicle || 0);
-    libStatus.textContent = `library: ${built}/${s.catalogue_size} built`;
+    libStatus.textContent = `assets: ${built}/${s.catalogue_size} built`;
   } catch (e) {
     libStatus.textContent = "library: ?";
   }

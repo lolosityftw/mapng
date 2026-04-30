@@ -171,6 +171,9 @@ function fmtBytes(n) {
 function updateStatus() {
   const built = state.entries.filter((e) => e.built).length;
   els.status.textContent = `${built} / ${state.entries.length} built`;
+  // Reflect total catalogue count on the 'Generate all' button
+  const cnt = document.getElementById("build-all-count");
+  if (cnt) cnt.textContent = `(${state.entries.length})`;
 }
 
 // ---------------------------------------------------------------------------
@@ -582,7 +585,10 @@ els.fSearch.addEventListener("input", () => { state.filter.search = els.fSearch.
 
 els.buildMissing.addEventListener("click", () => buildBatch(false));
 els.buildAll.addEventListener("click", () => {
-  if (confirm("Re-build all 34 entries? This regenerates everything via Meshy and burns credits.")) {
+  const n = state.entries.length;
+  const cap = parseInt(els.meshyPolycount?.value || "0", 10) || 0;
+  const capStr = cap ? `at ${cap.toLocaleString()} tris` : "at catalogue defaults";
+  if (confirm(`Generate all ${n} entries ${capStr}? Regenerates EVERY entry via Meshy and burns credits.`)) {
     buildBatch(true);
   }
 });
@@ -844,7 +850,13 @@ async function refreshActiveQuality() {
   try {
     const r = await fetch("/api/library/meshy-polycount");
     const { polycount } = await r.json();
-    if (els.meshyPolycount) els.meshyPolycount.value = polycount;
+    if (els.meshyPolycount) {
+      // Snap to closest known tier for the dropdown
+      const tiers = [1500, 2500, 5000, 7500, 10000, 15000, 20000];
+      const closest = tiers.reduce((a, b) =>
+        Math.abs(b - polycount) < Math.abs(a - polycount) ? b : a);
+      els.meshyPolycount.value = closest;
+    }
   } catch (e) {
     console.warn("polycount fetch failed", e);
   }
