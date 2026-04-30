@@ -19,7 +19,12 @@ from mapng_ai import config
 from mapng_ai.sources.base import BBoxLL
 
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+OVERPASS_ENDPOINTS = [
+    "https://overpass-api.de/api/interpreter",       # main (sometimes 504s)
+    "https://overpass.kumi.systems/api/interpreter", # community mirror
+    "https://overpass.openstreetmap.ru/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+]
 USER_AGENT = "mapng-ai/0.1 (https://github.com/anthropics/claude-code)"
 
 
@@ -53,6 +58,43 @@ class OSMData:
     raw_path: Path
 
 
+async def _fetch_overpass_with_fallback(query: str) -> dict:
+    """Try each endpoint with retries. Raises a clear RuntimeError on full
+    failure so the pipeline can surface a useful message."""
+    last_status = None
+    last_text = ""
+    headers = {"User-Agent": USER_AGENT, "Accept-Encoding": "gzip"}
+    timeout = httpx.Timeout(connect=10.0, read=180.0, write=30.0, pool=10.0)
+    attempts_per_endpoint = 3
+
+    async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
+        for endpoint in OVERPASS_ENDPOINTS:
+            for i in range(attempts_per_endpoint):
+                try:
+                    r = await client.post(endpoint, data={"data": query})
+                except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
+                    last_status = "network"
+                    last_text = f"{type(exc).__name__}: {exc}"
+                    if i < attempts_per_endpoint - 1:
+                        await asyncio.sleep(2 ** i + 1)
+                        continue
+                    break       # try next endpoint
+                if r.status_code == 200:
+                    return r.json()
+                last_status = r.status_code
+                last_text = r.text[:200]
+                # 429/5xx → retry on this endpoint, then move on; 4xx else → bail entirely
+                if r.status_code in (429, 502, 503, 504, 524):
+                    if i < attempts_per_endpoint - 1:
+                        await asyncio.sleep(2 ** i + 2)
+                        continue
+                    break       # next endpoint
+                r.raise_for_status()
+    raise RuntimeError(
+        f"All Overpass endpoints failed. Last status: {last_status}. {last_text}"
+    )
+
+
 async def fetch_osm(bbox: BBoxLL) -> OSMData:
     cache_dir = config.CACHE_DIR / "overpass"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -62,20 +104,7 @@ async def fetch_osm(bbox: BBoxLL) -> OSMData:
     if cache_file.exists():
         raw = json.loads(cache_file.read_text(encoding="utf-8"))
     else:
-        async with httpx.AsyncClient(
-            timeout=120.0,
-            headers={"User-Agent": USER_AGENT, "Accept-Encoding": "gzip"},
-        ) as client:
-            attempts = 3
-            for i in range(attempts):
-                r = await client.post(OVERPASS_URL, data={"data": _query(bbox)})
-                if r.status_code == 200:
-                    break
-                if r.status_code in (429, 504, 502, 503) and i < attempts - 1:
-                    await asyncio.sleep(2 ** i + 1)
-                    continue
-                r.raise_for_status()
-            raw = r.json()
+        raw = await _fetch_overpass_with_fallback(_query(bbox))
         cache_file.write_text(json.dumps(raw), encoding="utf-8")
 
     nodes: dict[int, tuple[float, float]] = {}
