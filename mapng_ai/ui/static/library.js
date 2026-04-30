@@ -30,7 +30,8 @@ const els = {
   activeQuality: document.getElementById("active-quality"),
   buildMissing: document.getElementById("build-missing"),
   buildAll: document.getElementById("build-all"),
-  bakeVariants: document.getElementById("bake-variants"),
+  bakeActive: document.getElementById("bake-active"),
+  bakeAll: document.getElementById("bake-all"),
   terrainPack: document.getElementById("terrain-pack"),
   body: document.getElementById("entries-body"),
   batchStatus: document.getElementById("batch-status"),
@@ -531,22 +532,31 @@ async function downloadTerrainPack() {
 els.terrainPack.addEventListener("click", downloadTerrainPack);
 
 // ---- Pre-bake quality variants ---------------------------------------------
-async function bakeAllVariants() {
-  if (!confirm("Pre-bake every built entry at high/medium/low/minimum? Each variant takes a few seconds; expect a couple of minutes total.")) return;
-  els.bakeVariants.disabled = true;
+async function bakeQualities(qualities, btnEl) {
+  // qualities = null  → backend uses active quality only
+  // qualities = ["1.5k","5k",...]  → explicit set
+  const label = qualities === null ? "active" : qualities.join(", ");
+  if (!confirm(`Pre-bake every built entry at: ${label}? CPU-bound, ~10s per variant per entry.`)) return;
+  if (btnEl) btnEl.disabled = true;
   els.batchStatus.hidden = false;
   els.batchStatus.classList.remove("error");
-  els.batchStatus.textContent = "starting variant pre-bake…";
+  els.batchStatus.textContent = "starting pre-bake…";
   try {
-    const r = await fetch("/api/library/optimise/all", { method: "POST" });
-    const { job_id } = await r.json();
+    const r = await fetch("/api/library/optimise/all", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ qualities }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const { job_id, qualities: actual } = await r.json();
     if (state.liveJob) state.liveJob.close();
     const es = new EventSource(`/api/library/jobs/${job_id}/events`);
     state.liveJob = es;
     let done = 0, total = 0, failed = 0;
     es.addEventListener("bake:start", (ev) => {
-      total = JSON.parse(ev.data).total;
-      els.batchStatus.textContent = `pre-baking 0 / ${total} variants…`;
+      const d = JSON.parse(ev.data);
+      total = d.total;
+      els.batchStatus.textContent = `pre-baking 0 / ${total} (${d.qualities.join(', ')})…`;
     });
     es.addEventListener("variant:done", (ev) => {
       const d = JSON.parse(ev.data); done++;
@@ -558,27 +568,40 @@ async function bakeAllVariants() {
     });
     es.addEventListener("bake:done", () => {
       els.batchStatus.textContent = `pre-bake done — ${done} ok, ${failed} failed`;
-      els.bakeVariants.disabled = false;
+      if (btnEl) btnEl.disabled = false;
+      els.bakeActive.disabled = false;
+      els.bakeAll.disabled = false;
       es.close();
       state.liveJob = null;
       setTimeout(() => { els.batchStatus.hidden = true; }, 5000);
-      // Refresh the currently-selected entry's stats so new sizes show
       if (state.selectedSlug) loadStats(state.entries.find(e => e.slug === state.selectedSlug));
     });
     es.addEventListener("bake:error", (ev) => {
       const d = JSON.parse(ev.data);
       els.batchStatus.classList.add("error");
       els.batchStatus.textContent = `bake error: ${d.message}`;
-      els.bakeVariants.disabled = false;
+      if (btnEl) btnEl.disabled = false;
+      els.bakeActive.disabled = false;
+      els.bakeAll.disabled = false;
       es.close();
     });
   } catch (e) {
     els.batchStatus.classList.add("error");
     els.batchStatus.textContent = `bake failed: ${e}`;
-    els.bakeVariants.disabled = false;
+    if (btnEl) btnEl.disabled = false;
   }
 }
-els.bakeVariants.addEventListener("click", bakeAllVariants);
+
+function updateBakeActiveLabel() {
+  if (els.bakeActive && els.activeQuality) {
+    els.bakeActive.textContent = `Pre-bake ${els.activeQuality.value}`;
+  }
+}
+
+els.bakeActive.addEventListener("click", () => bakeQualities(null, els.bakeActive));
+els.bakeAll.addEventListener("click", () => bakeQualities(
+  ["100k", "50k", "10k", "5k", "1.5k"], els.bakeAll
+));
 
 els.d.generate.addEventListener("click", () => buildOne(state.selectedSlug, false));
 els.d.regenerate.addEventListener("click", () => {
@@ -630,12 +653,14 @@ async function refreshActiveQuality() {
     const r = await fetch("/api/library/active-quality");
     const { quality } = await r.json();
     if (els.activeQuality) els.activeQuality.value = quality;
+    updateBakeActiveLabel();
   } catch (e) {
     console.warn("active quality fetch failed", e);
   }
 }
 els.activeQuality?.addEventListener("change", async () => {
   const v = els.activeQuality.value;
+  updateBakeActiveLabel();
   try {
     await fetch("/api/library/active-quality", {
       method: "POST",

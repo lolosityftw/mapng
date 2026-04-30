@@ -428,11 +428,22 @@ async def set_active_quality_api(req: ActiveQualityRequest) -> dict:
 
 
 # ---- Pre-bake quality variants ----------------------------------------------
+class OptimiseAllRequest(BaseModel):
+    qualities: list[str] | None = None    # None = use active quality only
+
+
 @app.post("/api/library/optimise/all")
-async def post_optimise_all() -> dict:
-    """Pre-bake every catalogue entry at every quality preset, in parallel."""
+async def post_optimise_all(req: OptimiseAllRequest = OptimiseAllRequest()) -> dict:
+    """Pre-bake every catalogue entry at the requested qualities, in parallel.
+
+    Body: { "qualities": ["5k"] }                # only one
+           { "qualities": ["1.5k","5k","10k"] }  # subset
+           { "qualities": null }                 # use active quality only
+    """
     from mapng_ai.library_builder import CATALOGUE
-    from mapng_ai.library_builder.optimise import QUALITY_PRESETS, optimise
+    from mapng_ai.library_builder.optimise import (
+        QUALITY_PRESETS, get_active_quality, optimise,
+    )
     from mapng_ai.library_builder.runner import target_glb
 
     job_id = uuid.uuid4().hex[:12]
@@ -449,7 +460,14 @@ async def post_optimise_all() -> dict:
     job = _LibJob()
     _library_jobs[job_id] = job
 
-    qualities = ["100k", "50k", "10k", "5k", "1.5k"]   # skip 'original' (no rewrite)
+    if req.qualities is None:
+        qualities = [get_active_quality()]
+    else:
+        qualities = req.qualities
+    # Validate + drop 'original' (no rewrite needed)
+    qualities = [q for q in qualities if q in QUALITY_PRESETS and q != "original"]
+    if not qualities:
+        raise HTTPException(400, "no valid qualities to bake (note: 'original' is a no-op)")
 
     async def _bake_one(slug, q, src):
         try:
@@ -482,7 +500,7 @@ async def post_optimise_all() -> dict:
             await job.close()
 
     asyncio.create_task(_run())
-    return {"job_id": job_id}
+    return {"job_id": job_id, "qualities": qualities}
 
 
 @app.post("/api/library/optimise/{slug}")
