@@ -33,7 +33,9 @@ const FRAG = `
   uniform sampler2D diffuseMaps[4];
   uniform sampler2D normalMaps[4];
   uniform int numLayers;
+  uniform int waterLayerIndex;       // -1 if water not in top-4
   uniform float tileSize;            // metres per tile repeat
+  uniform float time;                // seconds, for water animation
   uniform vec3 sunDir;
   uniform vec3 sunColor;
   uniform vec3 ambientColor;
@@ -41,6 +43,7 @@ const FRAG = `
   uniform vec3 fogColor;
   uniform float fogNear;
   uniform float fogFar;
+  uniform float terrainHalf;         // half-side metres, for edge fade
 
   // Cheap hash → noise for macro variation
   float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -67,6 +70,7 @@ const FRAG = `
     vec3 albedo = vec3(0.0);
     vec3 nLocal = vec3(0.0, 0.0, 0.0);
     float total = 0.0;
+    float waterAmount = 0.0;
 
     // Loop unrolled for WebGL1 compatibility
     for (int i = 0; i < 4; i++) {
@@ -78,37 +82,56 @@ const FRAG = `
       albedo += d * a;
       nLocal += n * a;
       total += a;
+      if (i == waterLayerIndex) waterAmount = a;
     }
 
     if (total > 1e-3) {
       albedo /= total;
       nLocal /= total;
     } else {
-      // Where the splat masks have nothing, fall back to the first layer
       albedo = sampleLayer(0, diffuseMaps, worldUV).rgb;
     }
 
-    // Macro variation — slight tint shift at low frequency to break tiling
+    // Water override — animated reflective blue where water mask is strong
+    if (waterAmount > 0.5) {
+      float wave = vnoise(vWorldPos.xz * 0.4 + vec2(time * 0.2, time * 0.15));
+      float wave2 = vnoise(vWorldPos.xz * 1.1 - vec2(time * 0.4, 0.0));
+      vec3 waterTint = mix(vec3(0.16, 0.32, 0.52), vec3(0.30, 0.50, 0.65), wave);
+      // Subtle ripple normal
+      nLocal = mix(nLocal, vec3(wave2 * 0.3, 0.0, wave * 0.3), waterAmount);
+      albedo = mix(albedo, waterTint, waterAmount);
+    }
+
     float macro = vnoise(vWorldPos.xz * macroBlendFreq);
     albedo *= mix(0.85, 1.10, macro);
 
-    // Build a perturbed normal in world space.
-    // The terrain mesh's normal points up after the rotateX(-PI/2) we did,
-    // so vNormal ≈ (0, 1, 0). We treat normal-map XY as world XZ perturbation.
     vec3 N = normalize(vNormal + vec3(nLocal.x, 0.0, nLocal.y) * 0.6);
-
     vec3 L = normalize(sunDir);
     float lambert = max(dot(N, L), 0.0);
-    // soft wrap-around for ambient feel
     float wrap = clamp(dot(N, L) * 0.5 + 0.5, 0.0, 1.0);
 
     vec3 ambient = albedo * ambientColor * (0.6 + 0.4 * wrap);
     vec3 lit = albedo * sunColor * lambert;
+
+    // Specular highlight for water (Blinn–Phong-ish)
+    if (waterAmount > 0.3) {
+      vec3 V = normalize(cameraPosition - vWorldPos);
+      vec3 H = normalize(L + V);
+      float spec = pow(max(dot(N, H), 0.0), 64.0) * waterAmount;
+      lit += spec * sunColor * 1.4;
+    }
+
     vec3 colour = ambient + lit;
 
-    // Fog
+    // Edge fade — soften the hard cut-off where the terrain ends
+    vec2 edgeDist = max(abs(vWorldPos.xz) - terrainHalf * 0.92, 0.0);
+    float edgeFade = clamp(1.0 - max(edgeDist.x, edgeDist.y) / (terrainHalf * 0.08), 0.0, 1.0);
+    colour = mix(fogColor, colour, edgeFade);
+
+    // Distance fog (atmospheric perspective)
     float dist = length(vWorldPos - cameraPosition);
     float fogF = clamp((dist - fogNear) / max(fogFar - fogNear, 0.001), 0.0, 1.0);
+    fogF = pow(fogF, 1.4);    // mild ease so closer ground stays sharp
     colour = mix(colour, fogColor, fogF);
 
     gl_FragColor = vec4(colour, 1.0);
@@ -119,7 +142,7 @@ const FRAG = `
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
-export function createTerrainMaterial({ tileSize = 4.0, fogColor = 0xc7d6e0, fogNear = 1500, fogFar = 7000 } = {}) {
+export function createTerrainMaterial({ tileSize = 4.0, fogColor = 0xc7d6e0, fogNear = 1500, fogFar = 7000, terrainHalf = 1000 } = {}) {
   const blank = new THREE.DataTexture(
     new Uint8Array([128, 128, 255, 255]), 1, 1, THREE.RGBAFormat,
   );
@@ -134,7 +157,9 @@ export function createTerrainMaterial({ tileSize = 4.0, fogColor = 0xc7d6e0, fog
       diffuseMaps:   { value: blank4 },
       normalMaps:    { value: blank4 },
       numLayers:     { value: 0 },
+      waterLayerIndex: { value: -1 },
       tileSize:      { value: tileSize },
+      time:          { value: 0 },
       sunDir:        { value: new THREE.Vector3(0.5, 0.7, 0.4).normalize() },
       sunColor:      { value: new THREE.Color(0xfff1d6) },
       ambientColor:  { value: new THREE.Color(0xb6cdde) },
@@ -142,8 +167,12 @@ export function createTerrainMaterial({ tileSize = 4.0, fogColor = 0xc7d6e0, fog
       fogColor:      { value: new THREE.Color(fogColor) },
       fogNear:       { value: fogNear },
       fogFar:        { value: fogFar },
+      terrainHalf:   { value: terrainHalf },
     },
   });
+  mat.userData.tickTime = (dt) => {
+    mat.uniforms.time.value += dt;
+  };
   return mat;
 }
 
@@ -158,6 +187,8 @@ export function createTerrainMaterial({ tileSize = 4.0, fogColor = 0xc7d6e0, fog
 export async function applyTerrainLayers(material, layers, { sunDir } = {}) {
   // Pick top 4 with usable diffuse + opacity
   const usable = layers.filter((l) => l.opacityUrl && l.diffuseUrl).slice(0, 4);
+  const waterIdx = usable.findIndex((l) => l.key === "water");
+  material.uniforms.waterLayerIndex.value = waterIdx;
   const loader = new THREE.TextureLoader();
   loader.crossOrigin = "anonymous";
 

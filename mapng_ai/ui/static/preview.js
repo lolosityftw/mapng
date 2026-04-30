@@ -52,35 +52,35 @@ if (!container) {
 // ---------------------------------------------------------------------------
 function makeSky() {
   // Inner: gradient + scrolling clouds. Outer: glowing horizon ring.
-  const geo = new THREE.SphereGeometry(8000, 48, 24);
+  const geo = new THREE.SphereGeometry(9000, 48, 24);
   const mat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
     uniforms: {
       time:        { value: 0.0 },
-      topColor:    { value: new THREE.Color(0x4a7eb8) },
+      sunDir:      { value: new THREE.Vector3(0.5, 0.7, 0.4).normalize() },
+      sunColor:    { value: new THREE.Color(0xfff0c8) },
+      topColor:    { value: new THREE.Color(0x3766a8) },
       midColor:    { value: new THREE.Color(0x9bc6e5) },
       bottomColor: { value: new THREE.Color(0xe7eef0) },
       cloudColor:  { value: new THREE.Color(0xfdfdfd) },
       cloudShadow: { value: new THREE.Color(0xa3b5c8) },
     },
     vertexShader: `
-      varying vec3 vWorld;
       varying vec3 vNorm;
       void main() {
-        vec4 wp = modelMatrix * vec4(position, 1.0);
-        vWorld = wp.xyz;
         vNorm = normalize(position);
-        gl_Position = projectionMatrix * viewMatrix * wp;
+        gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);
       }`,
     fragmentShader: `
       uniform float time;
+      uniform vec3 sunDir;
+      uniform vec3 sunColor;
       uniform vec3 topColor;
       uniform vec3 midColor;
       uniform vec3 bottomColor;
       uniform vec3 cloudColor;
       uniform vec3 cloudShadow;
-      varying vec3 vWorld;
       varying vec3 vNorm;
 
       // Fast hash → noise
@@ -101,20 +101,30 @@ function makeSky() {
       }
 
       void main() {
-        float h = clamp(vNorm.y, 0.0, 1.0);
+        vec3 N = normalize(vNorm);
+        float h = clamp(N.y, 0.0, 1.0);
         // Three-stop vertical gradient
         vec3 lower = mix(bottomColor, midColor, smoothstep(0.0, 0.3, h));
         vec3 base = mix(lower, topColor, smoothstep(0.3, 1.0, h));
 
-        // Clouds projected onto the upper hemisphere; offset by time
-        vec2 uv = vec2(atan(vNorm.x, vNorm.z) * 1.0, vNorm.y * 2.5);
-        uv += vec2(time * 0.012, 0.0);
-        float c = fbm(uv * 1.6);
+        // Sun disc + glow + halo (warm tint near the sun direction)
+        float sunDot = clamp(dot(N, normalize(sunDir)), -1.0, 1.0);
+        float sunDisc = smoothstep(0.99965, 0.99996, sunDot);
+        float sunHalo = pow(max(sunDot, 0.0), 64.0) * 0.50;
+        float sunGlow = pow(max(sunDot, 0.0), 8.0)  * 0.18;
+        vec3 atmos = mix(base, sunColor, sunGlow + sunHalo * 0.6);
+
+        // Clouds projected onto upper hemisphere
+        vec2 uv = vec2(atan(N.x, N.z), N.y * 2.5);
+        uv += vec2(time * 0.010, 0.0);
+        float c = fbm(uv * 1.5);
         c = smoothstep(0.55, 0.85, c);
-        // Hide clouds near horizon and below
-        c *= smoothstep(0.10, 0.45, h);
+        c *= smoothstep(0.05, 0.45, h);
         vec3 cloud = mix(cloudShadow, cloudColor, smoothstep(0.55, 0.95, fbm(uv * 3.0 + 13.0)));
-        vec3 col = mix(base, cloud, c);
+        cloud *= mix(vec3(1.0), sunColor, max(sunDot, 0.0) * 0.4 + 0.1);
+
+        vec3 col = mix(atmos, cloud, c);
+        col += sunDisc * sunColor * 1.6;
         gl_FragColor = vec4(col, 1.0);
       }`,
   });
@@ -215,6 +225,9 @@ function boot() {
     requestAnimationFrame(loop);
     const dt = state.clock.getDelta();
     if (sky.material.uniforms?.time) sky.material.uniforms.time.value += dt;
+    if (state.terrainMesh?.material?.userData?.tickTime) {
+      state.terrainMesh.material.userData.tickTime(dt);
+    }
     if (state.placeholder) {
       state.placeholder.rotation.y += 0.005;
       state.placeholder.rotation.x += 0.002;
@@ -286,6 +299,7 @@ async function setHeightmap({ url, sideMeters, minM, maxM, segments = 256 }) {
     fogColor: 0xc7d6e0,
     fogNear: Math.max(800, sideMeters * 0.6),
     fogFar:  Math.max(4000, sideMeters * 3.0),
+    terrainHalf: sideMeters / 2,
   });
 
   if (state.terrainMesh) {
@@ -315,6 +329,11 @@ async function setHeightmap({ url, sideMeters, minM, maxM, segments = 256 }) {
     state.sunLight.position.copy(state.sun.position);
     state.sunLight.target.position.set(0, (minM + maxM) / 2, 0);
     state.sunLight.target.updateMatrixWorld();
+    // Push sun direction into sky shader so the disc + halo follow the light
+    if (state.sky?.material?.uniforms?.sunDir) {
+      state.sky.material.uniforms.sunDir.value
+        .copy(state.sun.position).normalize();
+    }
   }
 }
 
@@ -553,6 +572,50 @@ async function setBuildings(buildings) {
 const TREE_GLB_RADIUS = 600;     // metres around the camera target
 const MAX_GLB_TREES = 250;       // cap GLB instances regardless of bucket
 
+// Procedural tree silhouette texture — used on the billboard quads so
+// distant trees look like trees, not green rectangles.
+let _treeBillboardTex = null;
+function _treeBillboardTexture() {
+  if (_treeBillboardTex) return _treeBillboardTex;
+  const w = 128, h = 192;
+  const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+  const cx = cv.getContext("2d");
+  cx.clearRect(0, 0, w, h);
+  // Trunk
+  cx.fillStyle = "#5d4037";
+  cx.fillRect(w / 2 - 5, h - 50, 10, 50);
+  // Canopy (overlapping circles for organic look)
+  const canopyColor = "#2e7d32";
+  cx.fillStyle = canopyColor;
+  const blobs = [
+    [w * 0.5, h * 0.30, 38],
+    [w * 0.32, h * 0.45, 30],
+    [w * 0.68, h * 0.45, 30],
+    [w * 0.40, h * 0.62, 26],
+    [w * 0.62, h * 0.62, 26],
+    [w * 0.50, h * 0.55, 32],
+    [w * 0.50, h * 0.74, 24],
+  ];
+  for (const [bx, by, br] of blobs) {
+    cx.beginPath(); cx.arc(bx, by, br, 0, Math.PI * 2); cx.fill();
+  }
+  // Subtle highlight
+  cx.fillStyle = "#4a8a3a";
+  for (const [bx, by, br] of blobs) {
+    cx.beginPath(); cx.arc(bx - br * 0.25, by - br * 0.25, br * 0.55, 0, Math.PI * 2); cx.fill();
+  }
+  // Subtle shadow
+  cx.fillStyle = "#1f5722";
+  for (const [bx, by, br] of blobs) {
+    cx.beginPath(); cx.arc(bx + br * 0.20, by + br * 0.20, br * 0.40, 0, Math.PI * 2); cx.fill();
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  _treeBillboardTex = tex;
+  return tex;
+}
+
 async function setFoliage({ trees, hedges }) {
   if (!state.scene) return;
   console.info("[preview] setFoliage trees=%d hedges=%d", trees?.length ?? 0, hedges?.length ?? 0);
@@ -583,7 +646,9 @@ async function setFoliage({ trees, hedges }) {
   if (billboardTrees.length) {
     const quad = new THREE.PlaneGeometry(1, 1);
     const billboardMat = new THREE.MeshLambertMaterial({
-      color: 0x3a6e2a, transparent: true, alphaTest: 0.4, depthWrite: false, side: THREE.DoubleSide,
+      map: _treeBillboardTexture(),
+      transparent: true, alphaTest: 0.5,
+      depthWrite: true, side: THREE.DoubleSide,
     });
     const inst = new THREE.InstancedMesh(quad, billboardMat, billboardTrees.length);
     inst.castShadow = false;
@@ -591,12 +656,14 @@ async function setFoliage({ trees, hedges }) {
     for (let i = 0; i < billboardTrees.length; i++) {
       const t = billboardTrees[i];
       const [, , sz] = t.scale;
-      // Vertical orientation: stand upright
-      q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -t.yaw);
+      // Add a tiny per-instance yaw jitter so neighbouring trees don't all
+      // face the same way.
+      const yawJit = -t.yaw + ((i * 137) % 360) * Math.PI / 180;
+      q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yawJit);
       m.compose(
         new THREE.Vector3(t.x, t.z + sz / 2, -t.y),
         q,
-        new THREE.Vector3(sz * 0.7, sz, 1),
+        new THREE.Vector3(sz * 0.85, sz, 1),
       );
       inst.setMatrixAt(i, m);
     }
