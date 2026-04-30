@@ -35,6 +35,25 @@ if _dotenv.exists():
 
 config.ensure_runtime_dirs()
 
+
+# Auto-prune old job output dirs at boot. Keep the 12 most-recent so
+# refreshed pages still resolve their artifact URLs.
+def _prune_output_dirs(keep: int = 12) -> None:
+    try:
+        dirs = [d for d in config.OUTPUT_DIR.iterdir() if d.is_dir()]
+        dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+        import shutil
+        for d in dirs[keep:]:
+            try:
+                shutil.rmtree(d, ignore_errors=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+_prune_output_dirs()
+
 app = FastAPI(title="MapNG-AI", version="0.1.0")
 
 # Cache-bust static asset URLs every time the server starts, so the browser

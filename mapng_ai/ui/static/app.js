@@ -80,6 +80,32 @@ function setBBox(rect) {
   generateBtn.disabled = false;
 }
 
+// Bbox presets — picks a 2 km area centred on each location and draws it
+const PRESETS = {
+  cookstown_rural:   { lat: 54.6479, lon: -6.7456, zoom: 13 },
+  cookstown_town:    { lat: 54.6420, lon: -6.7470, zoom: 14 },
+  belfast_west:      { lat: 54.5973, lon: -5.9301, zoom: 14 },
+  giants_causeway:   { lat: 55.2407, lon: -6.5117, zoom: 14 },
+  newcastle_mournes: { lat: 54.2169, lon: -5.8901, zoom: 13 },
+};
+function applyPreset(key) {
+  const p = PRESETS[key];
+  if (!p) return;
+  // 2 km square: ~0.018 deg lat, longitude scaled by cos(lat)
+  const halfLat = 1.0 / 111.0;   // ~1 km lat
+  const halfLon = halfLat / Math.cos(p.lat * Math.PI / 180);
+  const bounds = L.latLngBounds(
+    [p.lat - halfLat, p.lon - halfLon],
+    [p.lat + halfLat, p.lon + halfLon],
+  );
+  map.flyToBounds(bounds, { duration: 0.7 });
+  const rect = L.rectangle(bounds, { color: "#d29922", weight: 2 });
+  setBBox(rect);
+}
+document.getElementById("preset")?.addEventListener("change", (ev) => {
+  if (ev.target.value) applyPreset(ev.target.value);
+});
+
 map.on(L.Draw.Event.CREATED, (e) => setBBox(e.layer));
 map.on("draw:deleted", () => {
   currentBBox = null;

@@ -26,6 +26,14 @@
     <h2>1. Pick a 2 km area</h2>
     <div id="map"></div>
     <div class="controls">
+      <select id="preset" title="Jump the map to a known location">
+        <option value="">(presets)</option>
+        <option value="cookstown_rural">Cookstown rural (default)</option>
+        <option value="cookstown_town">Cookstown town centre</option>
+        <option value="belfast_west">Belfast — west</option>
+        <option value="giants_causeway">Giant's Causeway</option>
+        <option value="newcastle_mournes">Newcastle / Mourne</option>
+      </select>
       <div class="bbox-readout" id="bbox-readout">draw a rectangle on the map</div>
       <button id="generate" disabled>Generate</button>
     </div>
