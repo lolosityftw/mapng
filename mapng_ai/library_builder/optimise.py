@@ -363,9 +363,12 @@ def stats_for_all_qualities(src_path: Path) -> dict[str, dict]:
                 "exists": True,
             }
         else:
-            target_dim = QUALITY_PRESETS[q] or 0
+            preset = QUALITY_PRESETS[q]
+            target_dim = preset.max_texture_dim or 0
             out[q] = {
-                "exists": False, "max_dim_target": target_dim,
+                "exists": False,
+                "max_dim_target": target_dim,
+                "target_triangles": preset.target_triangles,
                 # Predicted GPU bytes if we built at this quality
                 "gpu_texture_bytes": (target_dim * target_dim * 4 * base.image_count) if target_dim else 0,
             }
