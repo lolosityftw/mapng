@@ -39,13 +39,43 @@ class QualityPreset:
     target_triangles: int | None   # None = keep original; cap per-mesh count
 
 
+# Triangle-target keys map to texture-resolution + decimation pairs.
+# `original` is the only escape hatch (no processing); the five user-facing
+# variants are the triangle-count keys the user selects from.
 QUALITY_PRESETS: dict[str, QualityPreset] = {
-    "ultra":   QualityPreset(max_texture_dim=None,  target_triangles=None),
-    "high":    QualityPreset(max_texture_dim=1024,  target_triangles=50_000),
-    "medium":  QualityPreset(max_texture_dim=512,   target_triangles=15_000),
-    "low":     QualityPreset(max_texture_dim=256,   target_triangles=5_000),
-    "minimum": QualityPreset(max_texture_dim=128,   target_triangles=1_500),
+    "1.5k":     QualityPreset(max_texture_dim=128,   target_triangles=1_500),
+    "5k":       QualityPreset(max_texture_dim=256,   target_triangles=5_000),
+    "10k":      QualityPreset(max_texture_dim=512,   target_triangles=10_000),
+    "50k":      QualityPreset(max_texture_dim=1024,  target_triangles=50_000),
+    "100k":     QualityPreset(max_texture_dim=2048,  target_triangles=100_000),
+    "original": QualityPreset(max_texture_dim=None,  target_triangles=None),
 }
+
+DEFAULT_QUALITY = "10k"
+
+
+# Active quality setting persists in a single line file. The library page is
+# the only thing that writes to it; the main pipeline just reads it.
+_ACTIVE_QUALITY_FILE = config.CACHE_DIR / "active_quality.txt"
+
+
+def get_active_quality() -> str:
+    if _ACTIVE_QUALITY_FILE.exists():
+        try:
+            v = _ACTIVE_QUALITY_FILE.read_text(encoding="utf-8").strip()
+            if v in QUALITY_PRESETS:
+                return v
+        except Exception:
+            pass
+    return DEFAULT_QUALITY
+
+
+def set_active_quality(quality: str) -> str:
+    if quality not in QUALITY_PRESETS:
+        raise ValueError(f"unknown quality: {quality}")
+    _ACTIVE_QUALITY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _ACTIVE_QUALITY_FILE.write_text(quality + "\n", encoding="utf-8")
+    return quality
 
 
 _OPT_CACHE = config.CACHE_DIR / "glb_optimised"
@@ -108,7 +138,7 @@ def stats(src_path: Path) -> GlbStats:
 # ---------------------------------------------------------------------------
 def cache_path(src_path: Path, quality: str) -> Path:
     """Where the optimised version of `src_path` at `quality` lives on disk."""
-    if quality == "ultra":
+    if quality == "original":
         return src_path
     rel = src_path.stem
     return _OPT_CACHE / quality / f"{rel}.glb"
@@ -263,7 +293,7 @@ def optimise(src_path: Path, quality: str) -> Path:
         raise ValueError(f"unknown quality: {quality}")
     preset = QUALITY_PRESETS[quality]
     if preset.max_texture_dim is None and preset.target_triangles is None:
-        return src_path     # ultra: original
+        return src_path     # original: no processing
 
     dst = cache_path(src_path, quality)
     if dst.exists() and dst.stat().st_size > 0 and dst.stat().st_mtime >= src_path.stat().st_mtime:
@@ -306,14 +336,14 @@ def stats_for_all_qualities(src_path: Path) -> dict[str, dict]:
     """Lazy stats per preset — only compares file sizes, no GLB rewrite."""
     out = {}
     base = stats(src_path)
-    out["ultra"] = {
+    out["original"] = {
         "file_size": base.file_size, "image_max_dim": base.image_max_dim,
         "image_count": base.image_count, "image_total_bytes": base.image_total_bytes,
         "triangle_count": base.triangle_count,
         "gpu_texture_bytes": estimate_gpu_texture_bytes(base),
         "exists": src_path.exists(),
     }
-    for q in ("high", "medium", "low", "minimum"):
+    for q in ("100k", "50k", "10k", "5k", "1.5k"):
         cp = cache_path(src_path, q)
         if cp.exists() and cp.stat().st_size > 0:
             s = stats(cp)

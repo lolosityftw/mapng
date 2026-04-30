@@ -404,7 +404,7 @@ function _hideLoadingBadge() {
 }
 
 async function _loadGlb(shapeRelpath) {
-  const quality = window._mapngQuality || "medium";
+  const quality = window._mapngQuality || "10k";
   const cacheKey = `${shapeRelpath}|${quality}`;
   let cached = _glbCache.get(cacheKey);
   if (cached) return cached;

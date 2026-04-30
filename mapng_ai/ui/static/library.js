@@ -27,6 +27,7 @@ const els = {
   fBuilt: document.getElementById("f-built"),
   fSort: document.getElementById("f-sort"),
   fSearch: document.getElementById("f-search"),
+  activeQuality: document.getElementById("active-quality"),
   buildMissing: document.getElementById("build-missing"),
   buildAll: document.getElementById("build-all"),
   bakeVariants: document.getElementById("bake-variants"),
@@ -199,7 +200,7 @@ async function loadStats(e) {
     const r = await fetch(`/api/library/entries/${e.slug}/stats`);
     const data = await r.json();
     if (!data.exists) { block.hidden = true; return; }
-    const order = ["ultra", "high", "medium", "low", "minimum"];
+    const order = ["original", "100k", "50k", "10k", "5k", "1.5k"];
     const fmt = (n) => n < 1024 ? `${n} B`
                        : n < 1024 ** 2 ? `${(n / 1024).toFixed(1)} KB`
                        : `${(n / 1024 ** 2).toFixed(1)} MB`;
@@ -216,8 +217,8 @@ async function loadStats(e) {
                 <td>${gpu}</td>
               </tr>`;
     }).join("");
-    trisEl.textContent = data.qualities.ultra?.triangle_count
-      ? data.qualities.ultra.triangle_count.toLocaleString()
+    trisEl.textContent = data.qualities.original?.triangle_count
+      ? data.qualities.original.triangle_count.toLocaleString()
       : "?";
   } catch (err) {
     body.innerHTML = `<tr><td colspan="4">stats failed: ${err}</td></tr>`;
@@ -623,7 +624,31 @@ els.d.delete.addEventListener("click", async () => {
   selectEntry(state.selectedSlug);
 });
 
+// ---- Active quality (the value the main pipeline reads) --------------------
+async function refreshActiveQuality() {
+  try {
+    const r = await fetch("/api/library/active-quality");
+    const { quality } = await r.json();
+    if (els.activeQuality) els.activeQuality.value = quality;
+  } catch (e) {
+    console.warn("active quality fetch failed", e);
+  }
+}
+els.activeQuality?.addEventListener("change", async () => {
+  const v = els.activeQuality.value;
+  try {
+    await fetch("/api/library/active-quality", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ quality: v }),
+    });
+  } catch (e) {
+    console.warn("set active quality failed", e);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 loadCatalogue();
+refreshActiveQuality();

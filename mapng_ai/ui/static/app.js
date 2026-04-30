@@ -2,23 +2,22 @@
    Map picker (Leaflet) + progress feed (SSE) + library batch panel.
    3D preview lives in preview.js as an ES module. */
 
-// ---- Quality selector -------------------------------------------------------
-const qualitySel = document.getElementById("quality");
+// ---- Active quality readout (the value lives on /library) ------------------
+const qualityReadout = document.getElementById("quality-readout");
 const sceneSize = document.getElementById("scene-size");
-window._mapngQuality = (qualitySel?.value) || "medium";
-qualitySel?.addEventListener("change", () => {
-  window._mapngQuality = qualitySel.value;
-  // Drop the GLB cache so the next setBuildings/setFoliage refetches at new quality
-  window.MapNGPreview?.invalidateGlbCache?.();
-  // If we have last-seen placements, re-apply with the new quality
-  const last = window._mapngLastPlace;
-  if (last) {
-    if (last.buildings) window.MapNGPreview?.setBuildings?.(last.buildings);
-    if (last.trees || last.hedges) {
-      window.MapNGPreview?.setFoliage?.({ trees: last.trees || [], hedges: last.hedges || [] });
-    }
+window._mapngQuality = "10k";
+
+async function refreshActiveQuality() {
+  try {
+    const r = await fetch("/api/library/active-quality");
+    const { quality } = await r.json();
+    window._mapngQuality = quality;
+    if (qualityReadout) qualityReadout.textContent = `quality: ${quality}`;
+  } catch (e) {
+    if (qualityReadout) qualityReadout.textContent = "quality: ?";
   }
-});
+}
+refreshActiveQuality();
 
 // ---- Library status indicator (link to /library for management) -----------
 const libStatus = document.getElementById("lib-status");
@@ -175,6 +174,9 @@ generateBtn.addEventListener("click", async () => {
   document.getElementById("download-list").innerHTML = "";
   window._satelliteUsed = false;
   window.MapNGPreview?.reset?.();
+  // Pick up any change made to the library's active quality before this run
+  await refreshActiveQuality();
+  window.MapNGPreview?.invalidateGlbCache?.();
 
   const res = await fetch("/api/generate", {
     method: "POST",

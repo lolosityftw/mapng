@@ -51,9 +51,20 @@
     <input id="f-search" type="search" placeholder="search prompts…" />
   </div>
   <div class="actions">
+    <label class="active-quality" title="The pipeline uses this quality variant for every library asset placed in a generated map.">
+      <span>Active quality (used by main pipeline)</span>
+      <select id="active-quality">
+        <option value="1.5k">1.5K tris · 128 px</option>
+        <option value="5k">5K tris · 256 px</option>
+        <option value="10k">10K tris · 512 px</option>
+        <option value="50k">50K tris · 1024 px</option>
+        <option value="100k">100K tris · 2048 px</option>
+        <option value="original">Original (uncompressed)</option>
+      </select>
+    </label>
     <button id="build-missing" class="primary">Build missing</button>
     <button id="build-all" class="ghost">Re-build all</button>
-    <button id="bake-variants" class="ghost" title="Pre-bake all quality variants for every built entry — speeds up the preview when switching quality presets">Pre-bake quality variants</button>
+    <button id="bake-variants" class="ghost" title="Pre-bake all quality variants for every built entry — speeds up subsequent map generations">Pre-bake quality variants</button>
     <button id="terrain-pack" class="ghost" title="Download CC0 PBR ground textures from Poly Haven">Terrain PBR pack</button>
   </div>
 </section>

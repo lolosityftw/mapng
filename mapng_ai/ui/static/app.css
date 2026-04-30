@@ -124,6 +124,12 @@ button:not(:disabled):hover { background: #3fb950; }
   background: #0d1117; color: #e6e8eb; border: 1px solid #2a2f37;
   padding: 4px 8px; border-radius: 4px; font-size: 12px;
 }
+.quality-readout {
+  font-family: ui-monospace, Consolas, monospace; font-size: 11px;
+  color: #adbac7;
+  background: #1f2630; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid #2a3a4a;
+}
 .scene-size {
   font-family: ui-monospace, Consolas, monospace; font-size: 11px;
   color: #6e7681;

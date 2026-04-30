@@ -337,16 +337,22 @@ async def get_entry_glb(slug: str) -> FileResponse:
 
 # ---- Library asset serving (used by /preview) -------------------------------
 @app.get("/api/asset")
-async def get_asset_by_relpath(path: str, quality: str = "ultra") -> FileResponse:
+async def get_asset_by_relpath(path: str, quality: str | None = None) -> FileResponse:
     """Serve a GLB/DAE/PNG from `assets/` by its in-zip relative path.
 
-    `quality=ultra|high|medium|low|minimum` triggers texture downscaling on
-    GLBs (cached on disk per quality). `ultra` returns the original.
+    `quality` triggers texture downscaling + decimation on GLBs; cached per
+    quality on disk. When no quality is given, falls back to the library-wide
+    active quality (settable via /api/library/active-quality, defaulting to
+    'original' if never set).
     """
-    from mapng_ai.library_builder.optimise import optimise, QUALITY_PRESETS
+    from mapng_ai.library_builder.optimise import (
+        optimise, QUALITY_PRESETS, get_active_quality,
+    )
 
     if ".." in path or path.startswith(("/", "\\")):
         raise HTTPException(400, "Invalid path")
+    if quality is None:
+        quality = get_active_quality()
     if quality not in QUALITY_PRESETS:
         raise HTTPException(400, f"Unknown quality: {quality}")
 
@@ -397,6 +403,30 @@ async def get_entry_stats(slug: str) -> dict:
     return {"slug": slug, "exists": True, "qualities": qualities}
 
 
+# ---- Active quality (persisted; library owns it, main pipeline reads it) ----
+class ActiveQualityRequest(BaseModel):
+    quality: str
+
+
+@app.get("/api/library/active-quality")
+async def get_active_quality_api() -> dict:
+    from mapng_ai.library_builder.optimise import (
+        QUALITY_PRESETS, get_active_quality,
+    )
+    q = get_active_quality()
+    return {"quality": q, "available": list(QUALITY_PRESETS.keys())}
+
+
+@app.post("/api/library/active-quality")
+async def set_active_quality_api(req: ActiveQualityRequest) -> dict:
+    from mapng_ai.library_builder.optimise import set_active_quality
+    try:
+        q = set_active_quality(req.quality)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"quality": q}
+
+
 # ---- Pre-bake quality variants ----------------------------------------------
 @app.post("/api/library/optimise/all")
 async def post_optimise_all() -> dict:
@@ -419,7 +449,7 @@ async def post_optimise_all() -> dict:
     job = _LibJob()
     _library_jobs[job_id] = job
 
-    qualities = ["high", "medium", "low", "minimum"]   # skip 'ultra' (no rewrite)
+    qualities = ["100k", "50k", "10k", "5k", "1.5k"]   # skip 'original' (no rewrite)
 
     async def _bake_one(slug, q, src):
         try:
@@ -479,7 +509,7 @@ async def post_optimise_one(slug: str) -> dict:
     _library_jobs[job_id] = job
 
     async def _run():
-        qualities = ["high", "medium", "low", "minimum"]
+        qualities = ["100k", "50k", "10k", "5k", "1.5k"]
         await job.emit("bake:start", {"total": len(qualities), "qualities": qualities})
         for q in qualities:
             try:
