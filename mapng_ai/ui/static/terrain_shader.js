@@ -64,6 +64,25 @@ const FRAG = `
     return texture2D(maps[3], uv);
   }
 
+  // Anti-tile sampler: samples a tile at TWO different scales+offsets and
+  // blends them by low-frequency macro noise, additionally rotating the
+  // primary UV by a discrete 4-bin angle per ~80 m macro cell. The visible
+  // result: no obvious tile boundary because the pattern shifts gradually
+  // across the terrain instead of repeating identically every tile.
+  vec4 sampleTile(int i, sampler2D maps[4], vec2 worldUV, vec2 worldXZ) {
+    // Coarse rotation: 0/90/180/270 degrees per macro cell (~80 m).
+    float rotIdx = floor(vnoise(worldXZ * 0.012) * 4.0);
+    float a = rotIdx * 1.5708;     // π/2 increments
+    float c = cos(a), s = sin(a);
+    mat2 R = mat2(c, -s, s, c);
+    vec2 uvA = R * worldUV;
+    vec2 uvB = worldUV * 0.43 + vec2(13.7, 23.1);
+    vec4 dA = sampleLayer(i, maps, uvA);
+    vec4 dB = sampleLayer(i, maps, uvB);
+    float m = smoothstep(0.35, 0.65, vnoise(worldXZ * 0.025));
+    return mix(dA, dB, m);
+  }
+
   void main() {
     vec2 worldUV = vWorldPos.xz / tileSize;
 
@@ -77,8 +96,8 @@ const FRAG = `
       if (i >= numLayers) break;
       float a = sampleLayer(i, opacityMaps, vUv).r;
       if (a <= 0.001) continue;
-      vec3 d = sampleLayer(i, diffuseMaps, worldUV).rgb;
-      vec3 n = sampleLayer(i, normalMaps, worldUV).rgb * 2.0 - 1.0;
+      vec3 d = sampleTile(i, diffuseMaps, worldUV, vWorldPos.xz).rgb;
+      vec3 n = sampleTile(i, normalMaps,  worldUV, vWorldPos.xz).rgb * 2.0 - 1.0;
       albedo += d * a;
       nLocal += n * a;
       total += a;

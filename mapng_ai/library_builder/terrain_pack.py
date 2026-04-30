@@ -33,8 +33,8 @@ PBR_CACHE = config.CACHE_DIR / "pbr"
 _CLASS_TO_SLUG: dict[str, str | None] = {
     "asphalt":  "asphalt_02",
     "concrete": "concrete_layers_02",
-    "lawn":     "aerial_grass_rock",          # short well-kept grass
-    "pasture":  "aerial_grass_rock",          # NI pasture is similar in look
+    "lawn":     "leafy_grass",                # lush bright grass for manicured areas
+    "pasture":  "leafy_grass",                # lush NI pasture — wet, green, leafy
     "earth":    "mud_forest",
     "gravel":   "gravelly_sand",
     "water":    None,                         # no usable water texture on Poly Haven; procedural is fine

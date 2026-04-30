@@ -67,9 +67,8 @@ BUILDINGS: list[CatalogueEntry] = [
     CatalogueEntry("building", "shed", "ni_machinery_shed",
                    f"an open-fronted three-bay machinery shed with corrugated metal roof, {_NI_BG}",
                    footprint_m=(18, 9), levels=1, target_polycount=4_000),
-    CatalogueEntry("building", "industrial", "ni_industrial_shed",
-                   f"a long low industrial shed with corrugated metal walls and roof, {_NI_BG}",
-                   footprint_m=(40, 15), levels=1, target_polycount=6_000),
+    # Industrial shed dropped from the catalogue (rare in pure rural NI bboxes;
+    # OSM industrial=yes falls back to ni_machinery_shed via the type aliases)
 ]
 
 
@@ -84,13 +83,18 @@ _TREE_BG = (
 
 TREES: list[CatalogueEntry] = [
     # Trees are billboarded beyond ~600 m and there are 1000+ instances per
-    # map — keep them tiny. 1.5K-2K is plenty for the 250 close GLB clones.
+    # map — keep them tiny. 1.2K-1.5K is plenty for the 250 close GLB clones.
     CatalogueEntry("tree", "oak", "tree_oak",
                    f"mature oak tree with broad leafy canopy, {_TREE_BG}",
                    footprint_m=(8, 8), levels=1, target_polycount=1_500),
     CatalogueEntry("tree", "spruce", "tree_sitka_spruce",
                    f"tall sitka spruce conifer with conical canopy, {_TREE_BG}",
                    footprint_m=(5, 5), levels=1, target_polycount=1_200),
+    # Hawthorn — the iconic field-boundary / hedgerow tree in rural NI.
+    # Smaller and gnarlier than oak. Goes well at hedge edges and lone in fields.
+    CatalogueEntry("tree", "hawthorn", "tree_hawthorn",
+                   f"small gnarled hawthorn tree with sparse rounded canopy, {_TREE_BG}",
+                   footprint_m=(4, 4), levels=1, target_polycount=1_200),
 ]
 
 
