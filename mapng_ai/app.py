@@ -292,6 +292,7 @@ async def get_library_catalogue() -> dict:
 
 class LibraryBuildRequest(BaseModel):
     categories: list[str] | None = None     # None = all
+    force: bool = False                     # True = wipe cache, re-roll textures
 
 
 @app.post("/api/library/build")
@@ -317,7 +318,7 @@ async def post_library_build(req: LibraryBuildRequest) -> dict:
 
     async def _run():
         try:
-            await build_library(categories=req.categories, emit=job.emit)
+            await build_library(categories=req.categories, force=req.force, emit=job.emit)
         except Exception as exc:
             await job.emit("batch:error", {"message": f"{type(exc).__name__}: {exc}"})
         finally:

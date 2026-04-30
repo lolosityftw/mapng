@@ -53,15 +53,30 @@ Emit = Callable[[str, dict], Awaitable[None]]
 
 
 async def _gen_one(entry: CatalogueEntry, engine: MeshyEngine, sem: asyncio.Semaphore,
-                   progress: LibraryProgress, emit: Emit | None) -> bool:
+                   progress: LibraryProgress, emit: Emit | None,
+                   force: bool = False) -> bool:
     """Generate a single entry. Returns True on success/skip, False on failure."""
     glb = target_glb(entry)
-    if glb.exists() and glb.stat().st_size > 0:
+    if glb.exists() and glb.stat().st_size > 0 and not force:
         progress.skipped += 1
         progress.completed += 1
         if emit:
             await emit("entry:skip", {"slug": entry.slug, "reason": "cached"})
         return True
+    # Force-regenerate: drop the existing GLB so the engine doesn't hit its
+    # internal hash cache either, and clear any optimised variants.
+    if force and glb.exists():
+        try: glb.unlink()
+        except Exception: pass
+        try:
+            from mapng_ai.library_builder.optimise import _OPT_CACHE
+            for q_dir in _OPT_CACHE.iterdir() if _OPT_CACHE.exists() else []:
+                cached = q_dir / glb.name
+                if cached.exists():
+                    try: cached.unlink()
+                    except Exception: pass
+        except Exception:
+            pass
 
     target_dir(entry).mkdir(parents=True, exist_ok=True)
     progress.in_progress.append(entry.slug)
@@ -75,6 +90,7 @@ async def _gen_one(entry: CatalogueEntry, engine: MeshyEngine, sem: asyncio.Sema
             effective_prompt(entry),
             seed=hash(entry.slug) & 0xFFFFFFFF,
             target_polycount=getattr(entry, "target_polycount", None),
+            force=force,
         )
 
     if path is None:
@@ -120,6 +136,7 @@ async def build_library(
     *,
     categories: list[str] | None = None,
     concurrency: int | None = None,
+    force: bool = False,
     emit: Emit | None = None,
 ) -> LibraryProgress:
     engine = MeshyEngine(max_concurrency=concurrency)
@@ -148,7 +165,7 @@ async def build_library(
     # The engine already enforces its own semaphore + rate limiter, so we
     # don't double-cap here.
     sem = asyncio.Semaphore(engine.concurrency)
-    await asyncio.gather(*[_gen_one(e, engine, sem, progress, emit) for e in entries])
+    await asyncio.gather(*[_gen_one(e, engine, sem, progress, emit, force=force) for e in entries])
 
     if emit:
         await emit("batch:done", {"total": progress.total,

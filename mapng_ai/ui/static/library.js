@@ -35,6 +35,8 @@ const els = {
   buildAll: document.getElementById("build-all"),
   bakeActive: document.getElementById("bake-active"),
   bakeAll: document.getElementById("bake-all"),
+  regenBuildings: document.getElementById("regen-buildings"),
+  regenTrees: document.getElementById("regen-trees"),
   terrainPack: document.getElementById("terrain-pack"),
   body: document.getElementById("entries-body"),
   batchStatus: document.getElementById("batch-status"),
@@ -510,15 +512,17 @@ async function buildOne(slug, force) {
   }
 }
 
-async function buildBatch(force = false) {
+async function buildBatch(force = false, categories = null) {
   // Snapshot which slugs are about to run so we can mark them
-  const targets = state.entries.filter((e) => force || !e.built);
+  const targets = state.entries.filter((e) =>
+    (categories === null || categories.includes(e.category)) && (force || !e.built),
+  );
   for (const t of targets) setRunning(t.slug, true);
 
   const r = await fetch("/api/library/build", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ force, categories }),
   });
   const { job_id } = await r.json();
   streamJob(job_id, false);
@@ -592,6 +596,17 @@ els.buildAll.addEventListener("click", () => {
     buildBatch(true);
   }
 });
+
+function _regenCategoryConfirm(category, label) {
+  const n = state.entries.filter((e) => e.category === category).length;
+  const cap = parseInt(els.meshyPolycount?.value || "0", 10) || 0;
+  const capStr = cap ? `at ${cap.toLocaleString()} tris` : "at catalogue defaults";
+  if (confirm(`Re-roll ${n} ${label}(s) ${capStr}? Wipes existing GLBs + cached optimised variants. Burns Meshy credits.`)) {
+    buildBatch(true, [category]);
+  }
+}
+els.regenBuildings?.addEventListener("click", () => _regenCategoryConfirm("building", "building"));
+els.regenTrees?.addEventListener("click", () => _regenCategoryConfirm("tree", "tree"));
 
 // ---- Terrain PBR pack download (Poly Haven CC0) -----------------------------
 async function downloadTerrainPack() {

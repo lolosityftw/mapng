@@ -215,11 +215,14 @@ class MeshyEngine:
 
     # ---- Public API ------------------------------------------------------
     async def generate(self, prompt: str, seed: int,
-                       target_polycount: int | None = None) -> Path | None:
+                       target_polycount: int | None = None,
+                       force: bool = False) -> Path | None:
         """End-to-end: preview → optional refine → cached GLB path.
         `target_polycount` (if given) is requested directly from Meshy via
         `should_remesh=true` — much cleaner than client-side decimation
-        because UV layout stays valid."""
+        because UV layout stays valid.
+        `force=True` bypasses the local content-addressed cache, forcing a
+        fresh API roll (re-rolls textures even if the prompt is identical)."""
         if not self.cfg:
             return None
         # Apply user's global polycount cap (set on /library; persisted to disk).
@@ -239,7 +242,11 @@ class MeshyEngine:
         key = self.cache_key(prompt, seed, self.texture, target_polycount)
         out = self.cached_glb(key)
         if out.exists() and out.stat().st_size > 0:
-            return out
+            if force:
+                try: out.unlink()
+                except Exception: pass
+            else:
+                return out
 
         api_key, base_url = self.cfg
         headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
