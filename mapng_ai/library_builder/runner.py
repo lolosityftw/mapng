@@ -70,7 +70,11 @@ async def _gen_one(entry: CatalogueEntry, engine: MeshyEngine, sem: asyncio.Sema
                                    "type": entry.type, "prompt": entry.prompt})
 
     async with sem:
-        path = await engine.generate(entry.prompt, seed=hash(entry.slug) & 0xFFFFFFFF)
+        path = await engine.generate(
+            entry.prompt,
+            seed=hash(entry.slug) & 0xFFFFFFFF,
+            target_polycount=getattr(entry, "target_polycount", None),
+        )
 
     if path is None:
         progress.failed += 1

@@ -432,6 +432,22 @@ async def set_active_quality_api(req: ActiveQualityRequest) -> dict:
     return {"quality": q}
 
 
+class MeshyPolycountRequest(BaseModel):
+    polycount: int = 0
+
+
+@app.get("/api/library/meshy-polycount")
+async def get_meshy_polycount_api() -> dict:
+    from mapng_ai.library_builder.optimise import get_meshy_max_polycount
+    return {"polycount": get_meshy_max_polycount()}
+
+
+@app.post("/api/library/meshy-polycount")
+async def set_meshy_polycount_api(req: MeshyPolycountRequest) -> dict:
+    from mapng_ai.library_builder.optimise import set_meshy_max_polycount
+    return {"polycount": set_meshy_max_polycount(req.polycount)}
+
+
 # ---- Pre-bake quality variants ----------------------------------------------
 class OptimiseAllRequest(BaseModel):
     qualities: list[str] | None = None    # None = use active quality only

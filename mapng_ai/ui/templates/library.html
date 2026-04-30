@@ -68,6 +68,12 @@
     <button id="bake-all" class="ghost" title="Pre-bake every quality variant for every built entry — slow but lets you switch instantly later">Bake all qualities</button>
     <button id="terrain-pack" class="ghost" title="Download CC0 PBR ground textures from Poly Haven">Terrain PBR pack</button>
   </div>
+  <div class="actions secondary">
+    <label class="active-quality" title="Override the catalogue's per-entry target_polycount. Set 0 to use catalogue defaults. Higher = more detail + more credits.">
+      <span>Meshy max polycount</span>
+      <input id="meshy-polycount" type="number" min="0" step="500" value="10000" style="width:90px" />
+    </label>
+  </div>
 </section>
 
 <main>

@@ -145,11 +145,12 @@ class MeshyEngine:
     def configured(self) -> bool:
         return self.cfg is not None
 
-    def cache_key(self, prompt: str, seed: int, texture: bool) -> str:
-        # texture flag is part of the key — preview-only and textured are
-        # separate cached artefacts.
+    def cache_key(self, prompt: str, seed: int, texture: bool, polycount: int | None) -> str:
+        # All inputs that change the output go into the cache key. Different
+        # polycount targets are separate cached artefacts.
         salt = "tex" if texture else "raw"
-        return hashlib.sha1(f"{prompt}|{seed}|{salt}".encode()).hexdigest()[:20]
+        poly = f"p{polycount}" if polycount else "p0"
+        return hashlib.sha1(f"{prompt}|{seed}|{salt}|{poly}".encode()).hexdigest()[:20]
 
     def cached_glb(self, key: str) -> Path:
         return _CACHE_DIR / f"{key}.glb"
@@ -161,7 +162,8 @@ class MeshyEngine:
         return await client.request(method, url, **kwargs)
 
     async def _submit_preview(self, client: httpx.AsyncClient, base_url: str,
-                              prompt: str, seed: int) -> str | None:
+                              prompt: str, seed: int,
+                              target_polycount: int | None = None) -> str | None:
         payload = {
             "mode": "preview",
             "prompt": prompt,
@@ -170,6 +172,9 @@ class MeshyEngine:
             "ai_model": "meshy-6",
             "seed": seed,
         }
+        if target_polycount is not None and target_polycount > 0:
+            payload["target_polycount"] = int(target_polycount)
+            payload["should_remesh"] = True
         r = await self._request(client, "POST", f"{base_url}{_TEXT_TO_3D}", json=payload)
         if r.status_code >= 400:
             log.warning("meshy preview submit failed %d: %s", r.status_code, r.text[:200])
@@ -209,11 +214,29 @@ class MeshyEngine:
         return None
 
     # ---- Public API ------------------------------------------------------
-    async def generate(self, prompt: str, seed: int) -> Path | None:
-        """End-to-end: preview → optional refine → cached GLB path."""
+    async def generate(self, prompt: str, seed: int,
+                       target_polycount: int | None = None) -> Path | None:
+        """End-to-end: preview → optional refine → cached GLB path.
+        `target_polycount` (if given) is requested directly from Meshy via
+        `should_remesh=true` — much cleaner than client-side decimation
+        because UV layout stays valid."""
         if not self.cfg:
             return None
-        key = self.cache_key(prompt, seed, self.texture)
+        # Apply user's global polycount cap (set on /library; persisted to disk).
+        # Env var still wins if explicitly set.
+        env_max = int(_envf("MAPNG_MESHY_MAX_POLYCOUNT", 0))
+        cap = env_max
+        if cap <= 0:
+            try:
+                from mapng_ai.library_builder.optimise import get_meshy_max_polycount
+                cap = get_meshy_max_polycount()
+            except Exception:
+                cap = 0
+        if cap > 0:
+            target_polycount = (
+                cap if target_polycount is None else min(target_polycount, cap)
+            )
+        key = self.cache_key(prompt, seed, self.texture, target_polycount)
         out = self.cached_glb(key)
         if out.exists() and out.stat().st_size > 0:
             return out
@@ -224,7 +247,9 @@ class MeshyEngine:
             try:
                 async with httpx.AsyncClient(timeout=240.0, headers=headers) as client:
                     # 1) Preview
-                    preview_id = await self._submit_preview(client, base_url, prompt, seed)
+                    preview_id = await self._submit_preview(
+                        client, base_url, prompt, seed, target_polycount=target_polycount
+                    )
                     if not preview_id:
                         return None
                     preview = await self._poll(client, base_url, preview_id)
@@ -263,11 +288,12 @@ async def generate_building_for(
     levels: int,
     building_type: str,
     seed: int,
+    target_polycount: int | None = None,
 ) -> BuildingAsset | None:
     if not engine.configured:
         return None
     prompt = _prompt_for_building(building_type, levels, footprint_m2, seed)
-    glb_path = await engine.generate(prompt, seed)
+    glb_path = await engine.generate(prompt, seed, target_polycount=target_polycount)
     if glb_path is None:
         return None
     rel = f"art/shapes/buildings_ai/meshy_{glb_path.stem}.glb"

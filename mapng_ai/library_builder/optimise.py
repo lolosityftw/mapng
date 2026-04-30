@@ -78,6 +78,26 @@ def set_active_quality(quality: str) -> str:
     return quality
 
 
+_MESHY_POLYCOUNT_FILE = config.CACHE_DIR / "meshy_max_polycount.txt"
+
+
+def get_meshy_max_polycount() -> int:
+    """User's global polycount cap for Meshy generation. 0 = use catalogue defaults."""
+    if _MESHY_POLYCOUNT_FILE.exists():
+        try:
+            return max(0, int(_MESHY_POLYCOUNT_FILE.read_text(encoding="utf-8").strip()))
+        except Exception:
+            pass
+    return 10_000
+
+
+def set_meshy_max_polycount(n: int) -> int:
+    n = max(0, int(n))
+    _MESHY_POLYCOUNT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _MESHY_POLYCOUNT_FILE.write_text(str(n) + "\n", encoding="utf-8")
+    return n
+
+
 _OPT_CACHE = config.CACHE_DIR / "glb_optimised"
 
 

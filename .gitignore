@@ -22,6 +22,7 @@ mapng_ai/cache/
 mapng_ai/ai/models/
 /output/
 /assets/
+/assets_archive/
 *.ter
 *.zip
 .env

@@ -30,6 +30,7 @@ const els = {
   fSort: document.getElementById("f-sort"),
   fSearch: document.getElementById("f-search"),
   activeQuality: document.getElementById("active-quality"),
+  meshyPolycount: document.getElementById("meshy-polycount"),
   buildMissing: document.getElementById("build-missing"),
   buildAll: document.getElementById("build-all"),
   bakeActive: document.getElementById("bake-active"),
@@ -726,7 +727,25 @@ async function refreshActiveQuality() {
   } catch (e) {
     console.warn("active quality fetch failed", e);
   }
+  try {
+    const r = await fetch("/api/library/meshy-polycount");
+    const { polycount } = await r.json();
+    if (els.meshyPolycount) els.meshyPolycount.value = polycount;
+  } catch (e) {
+    console.warn("polycount fetch failed", e);
+  }
 }
+
+els.meshyPolycount?.addEventListener("change", async () => {
+  const n = parseInt(els.meshyPolycount.value || "0", 10);
+  try {
+    await fetch("/api/library/meshy-polycount", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ polycount: n }),
+    });
+  } catch (e) { console.warn("set polycount failed", e); }
+});
 els.activeQuality?.addEventListener("change", async () => {
   const v = els.activeQuality.value;
   updateBakeActiveLabel();
