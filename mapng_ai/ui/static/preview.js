@@ -343,8 +343,17 @@ async function setTerrainLayers(layers) {
     return;
   }
   console.info("[preview] setTerrainLayers:", layers.map(l => l.key).join(","));
+  // Server emits snake_case keys (opacity_url, diffuse_url, normal_url).
+  // applyTerrainLayers expects camelCase. Normalise here.
+  const normalised = layers.map((l) => ({
+    key: l.key,
+    coverage_pct: l.coverage_pct,
+    opacityUrl: l.opacity_url ?? l.opacityUrl ?? null,
+    diffuseUrl: l.diffuse_url ?? l.diffuseUrl ?? null,
+    normalUrl:  l.normal_url  ?? l.normalUrl  ?? null,
+  }));
   // Sort by coverage descending — top 4 wins
-  const sorted = [...layers].sort((a, b) => b.coverage_pct - a.coverage_pct);
+  const sorted = normalised.sort((a, b) => (b.coverage_pct ?? 0) - (a.coverage_pct ?? 0));
   try {
     const used = await applyTerrainLayers(state.terrainMesh.material, sorted, {
       sunDir: state.sunLight ? state.sunLight.position.clone().normalize() : undefined,
