@@ -490,6 +490,11 @@ function _placeholderInstance({ color, flat, sx, sy, sz, yaw, x, y, z }) {
   return m;
 }
 
+// Buildings within this radius from camera target render as full GLBs;
+// beyond that, instanced impostor boxes (1 draw call per colour bucket).
+const BUILDING_GLB_RADIUS = 500;     // metres
+const MAX_GLB_BUILDINGS = 200;
+
 async function setBuildings(buildings) {
   if (!state.scene) return;
   console.info("[preview] setBuildings:", buildings.length);
@@ -502,6 +507,54 @@ async function setBuildings(buildings) {
   const group = new THREE.Group();
   state.scene.add(group);
   state.buildingsGroup = group;
+
+  // Distance-sort and split into close (full GLB) and distant (impostor)
+  const cameraTarget = state.controls?.target || new THREE.Vector3();
+  const dist2 = (b) => {
+    const dx = b.x - cameraTarget.x;
+    const dy = -b.y - cameraTarget.z;
+    return dx * dx + dy * dy;
+  };
+  const sorted = buildings.slice().sort((a, b) => dist2(a) - dist2(b));
+  const closeBuildings = sorted
+    .filter((b) => Math.sqrt(dist2(b)) < BUILDING_GLB_RADIUS)
+    .slice(0, MAX_GLB_BUILDINGS);
+  const farBuildings = sorted.filter((b) => !closeBuildings.includes(b));
+
+  // ---- Distant impostors: one InstancedMesh per (color, roof-style) bucket ----
+  if (farBuildings.length) {
+    const pitchedGeo = _buildingGeometry({ flat: false });
+    const flatGeo = _buildingGeometry({ flat: true });
+    const buckets = new Map();
+    for (const b of farBuildings) {
+      const flat = _isFlatRoof(b.type);
+      const key = `${b.color}|${flat ? "f" : "p"}`;
+      if (!buckets.has(key)) buckets.set(key, { color: b.color, flat, list: [] });
+      buckets.get(key).list.push(b);
+    }
+    const m = new THREE.Matrix4(); const q = new THREE.Quaternion();
+    for (const { color, flat, list } of buckets.values()) {
+      const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.85 });
+      const inst = new THREE.InstancedMesh(flat ? flatGeo : pitchedGeo, mat, list.length);
+      inst.castShadow = inst.receiveShadow = true;
+      for (let i = 0; i < list.length; i++) {
+        const b = list[i];
+        const [sx, sy, sz] = b.scale;
+        q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -b.yaw);
+        m.compose(
+          new THREE.Vector3(b.x, b.z, -b.y),
+          q,
+          new THREE.Vector3(sx, sz, sy),
+        );
+        inst.setMatrixAt(i, m);
+      }
+      inst.instanceMatrix.needsUpdate = true;
+      group.add(inst);
+    }
+  }
+
+  // ---- Close buildings → full GLB clones (existing path) ----
+  buildings = closeBuildings;
 
   // Bucket by shape path (so each unique GLB loads once)
   const byShape = new Map();
@@ -754,6 +807,69 @@ async function setFoliage({ trees, hedges }) {
 }
 
 // ---------------------------------------------------------------------------
+// Build a ribbon mesh along a polyline at the given width — a flat strip
+// of 2-vertex-wide quads, perpendicular to the local segment, laid 0.3 m
+// above terrain so it z-fights nicely as a decal-style overlay.
+function _buildRoadRibbon(nodes, width) {
+  const verts = [];
+  const uvs = [];
+  const idx = [];
+  const halfW = width / 2;
+  let runLength = 0;     // for V coordinate, repeats the texture along length
+
+  // Convert (BeamNG x, y, z) → (Three x, z, -y), lifted +0.25 m
+  const toThree = ([x, y, z]) => new THREE.Vector3(x, z + 0.25, -y);
+  const pts3 = nodes.map(toThree);
+  if (pts3.length < 2) return null;
+
+  for (let i = 0; i < pts3.length; i++) {
+    // Tangent: average of neighbouring segments (for smoother joints)
+    const prev = pts3[Math.max(0, i - 1)];
+    const next = pts3[Math.min(pts3.length - 1, i + 1)];
+    const t = next.clone().sub(prev);
+    t.y = 0;
+    if (t.lengthSq() < 1e-6) t.set(1, 0, 0);
+    t.normalize();
+    // Perpendicular in the horizontal plane
+    const n = new THREE.Vector3(-t.z, 0, t.x);
+    const left = pts3[i].clone().addScaledVector(n, halfW);
+    const right = pts3[i].clone().addScaledVector(n, -halfW);
+    if (i > 0) {
+      runLength += pts3[i].distanceTo(pts3[i - 1]);
+    }
+    verts.push(left.x, left.y, left.z);
+    verts.push(right.x, right.y, right.z);
+    // Texture U across, V along length (one repeat per ~12 metres)
+    uvs.push(0, runLength / 12);
+    uvs.push(1, runLength / 12);
+  }
+
+  for (let i = 0; i < pts3.length - 1; i++) {
+    const a = i * 2, b = a + 1, c = a + 2, d = a + 3;
+    idx.push(a, c, b);
+    idx.push(b, c, d);
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+  geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+let _roadDecalTex = null;
+function _roadDecalTexture() {
+  if (_roadDecalTex) return _roadDecalTex;
+  const tex = new THREE.TextureLoader().load("/api/road-decal");
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;
+  _roadDecalTex = tex;
+  return tex;
+}
+
 function setRoads(roads) {
   if (!state.scene) return;
   console.info("[preview] setRoads:", roads.length);
@@ -764,13 +880,19 @@ function setRoads(roads) {
     });
   }
   const group = new THREE.Group();
-  const mat = new THREE.LineBasicMaterial({ color: 0x1c1c1c });
+  const sharedTex = _roadDecalTexture();
+  // Per-road clone of the texture so each can have its own repeat without
+  // disturbing others (cheap — backing image is shared via texture caching)
   for (const r of roads) {
-    const pts = [];
-    for (const [x, y, z] of r.nodes) pts.push(new THREE.Vector3(x, z + 0.2, -y));
-    if (pts.length < 2) continue;
-    const geo = new THREE.BufferGeometry().setFromPoints(pts);
-    group.add(new THREE.Line(geo, mat));
+    const geo = _buildRoadRibbon(r.nodes, r.width);
+    if (!geo) continue;
+    const mat = new THREE.MeshStandardMaterial({
+      map: sharedTex, roughness: 0.92, metalness: 0.0,
+      polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.receiveShadow = true;
+    group.add(mesh);
   }
   state.scene.add(group);
   state.roadsGroup = group;

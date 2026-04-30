@@ -340,6 +340,16 @@ async def get_entry_glb(slug: str, quality: str = "original") -> FileResponse:
     )
 
 
+@app.get("/api/road-decal")
+async def get_road_decal() -> FileResponse:
+    """The procedural asphalt+centreline tile used for road meshes in the
+    preview (and as the BeamNG decal road texture)."""
+    from mapng_ai.pipeline.decal_roads import write_road_decal_texture
+    p = await asyncio.to_thread(write_road_decal_texture)
+    return FileResponse(p, media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
 @app.get("/api/pbr/{class_key}/{map_kind}")
 async def get_pbr_map(class_key: str, map_kind: str) -> FileResponse:
     """Serve a Poly Haven PBR map (diffuse / normal / roughness) for the
