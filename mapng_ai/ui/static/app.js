@@ -106,6 +106,23 @@ document.getElementById("preset")?.addEventListener("change", (ev) => {
   if (ev.target.value) applyPreset(ev.target.value);
 });
 
+// ---- Fullscreen preview -----------------------------------------------------
+const previewPane = document.getElementById("preview-pane");
+const fsBtn = document.getElementById("preview-fullscreen");
+function togglePreviewFullscreen() {
+  if (!document.fullscreenElement) {
+    previewPane?.requestFullscreen?.().catch((e) => console.warn("fs request failed", e));
+  } else {
+    document.exitFullscreen?.();
+  }
+}
+fsBtn?.addEventListener("click", togglePreviewFullscreen);
+window.addEventListener("keydown", (ev) => {
+  if (ev.key === "f" && ev.target.tagName !== "INPUT" && ev.target.tagName !== "TEXTAREA") {
+    togglePreviewFullscreen();
+  }
+});
+
 map.on(L.Draw.Event.CREATED, (e) => setBBox(e.layer));
 map.on("draw:deleted", () => {
   currentBBox = null;

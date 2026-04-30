@@ -83,6 +83,11 @@ main {
 
 main > section { background: #1a1d23; padding: 16px 18px; overflow: auto; display: flex; flex-direction: column; }
 main h2 { margin: 0 0 12px; font-size: 13px; font-weight: 600; color: #adbac7; text-transform: uppercase; letter-spacing: 0.5px; }
+.pane-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.pane-head h2 { margin: 0; }
+.pane-head button.ghost { padding: 4px 12px; font-size: 11px; }
+#preview-pane:fullscreen { padding: 16px; background: #0d1117; }
+#preview-pane:fullscreen #preview { height: calc(100vh - 90px); }
 
 #map { flex: 1; min-height: 300px; border-radius: 4px; }
 .controls { display: flex; align-items: center; gap: 12px; margin-top: 10px; flex-wrap: wrap; }

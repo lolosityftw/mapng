@@ -29,9 +29,21 @@ _LL_TO_ITM = Transformer.from_crs("EPSG:4326", "EPSG:2157", always_xy=True)
 
 # Hard caps so we never emit absurd numbers
 MAX_TREES = 4000
-MAX_HEDGE_SEGMENTS = 1500
+MAX_HEDGE_SEGMENTS = 4000      # synthesised road hedges add lots
 TREES_PER_M2_FOREST = 0.035    # ~1 per 28 m²
 HEDGE_SEGMENT_LEN_M = 4.0      # subdivide long hedges into ~4 m chunks
+
+# Highways that get synthesised hedges flanking them. Rural NI roads are
+# almost always hedge-bordered but rarely tagged barrier=hedge in OSM.
+_ROAD_CLASSES_WITH_HEDGES = {
+    "secondary":     {"width": 9.0,  "hedge_offset": 1.5},
+    "tertiary":      {"width": 8.0,  "hedge_offset": 1.5},
+    "unclassified":  {"width": 7.0,  "hedge_offset": 1.2},
+    "residential":   {"width": 6.5,  "hedge_offset": 1.0},
+    "lane":          {"width": 5.0,  "hedge_offset": 0.8},
+    "track":         {"width": 4.5,  "hedge_offset": 0.8},
+    # motorway / trunk / primary deliberately excluded — verges, no hedges
+}
 
 
 @dataclass(frozen=True)
@@ -230,39 +242,85 @@ def place_foliage(osm: OSMData, region: Region, heightmap_m: np.ndarray, *, seed
 
     # ---- 3) Hedgerows ----
     hedges: list[HedgeSegment] = []
+
+    def _emit_segment(cx, cy, seg_len, yaw, *, width_m, height_m):
+        if abs(cx) > half or abs(cy) > half:
+            return
+        z = _z_at(heightmap_m, region.side_m, cx, cy)
+        hedges.append(HedgeSegment(
+            x=cx, y=cy, z=z, length_m=seg_len,
+            width_m=width_m, height_m=height_m, yaw=yaw,
+        ))
+
+    def _emit_along_line(line: LineString, *, width_m: float, height_m: float):
+        n_seg = max(1, int(np.ceil(line.length / HEDGE_SEGMENT_LEN_M)))
+        for i in range(n_seg):
+            if len(hedges) >= MAX_HEDGE_SEGMENTS:
+                return
+            t0, t1 = i / n_seg, (i + 1) / n_seg
+            p0 = line.interpolate(t0, normalized=True)
+            p1 = line.interpolate(t1, normalized=True)
+            seg_len = float(p0.distance(p1))
+            yaw = float(np.arctan2(p1.y - p0.y, p1.x - p0.x))
+            _emit_segment((p0.x + p1.x) / 2, (p0.y + p1.y) / 2, seg_len, yaw,
+                          width_m=width_m, height_m=height_m)
+
+    # 3a) Tagged OSM hedges/walls/fences — primary source
     for w in osm.ways:
+        if len(hedges) >= MAX_HEDGE_SEGMENTS:
+            break
         tags = w.get("tags") or {}
-        if tags.get("barrier") not in ("hedge", "hedgerow", "fence") \
-                and tags.get("natural") not in ("tree_row",):
+        is_hedge = tags.get("barrier") in ("hedge", "hedgerow", "fence") \
+            or tags.get("natural") in ("tree_row",)
+        if not is_hedge:
             continue
         line_ll = way_line_ll(w, osm.nodes)
         line = _project_line(line_ll, cx_world, cy_world)
         if line is None or line.length < 1.0:
             continue
-        # Subdivide into ~HEDGE_SEGMENT_LEN_M chunks so each TSStatic has a
-        # straight piece of hedge (no curve-following needed)
-        n_seg = max(1, int(np.ceil(line.length / HEDGE_SEGMENT_LEN_M)))
-        for i in range(n_seg):
+        is_fence = tags.get("barrier") == "fence"
+        _emit_along_line(line,
+                         width_m=(0.6 if is_fence else 0.9),
+                         height_m=(0.9 if is_fence else 1.6))
+
+    # 3b) Synthesised hedges along rural road centrelines. NI roads almost
+    # always have hedges either side but they're rarely tagged. We offset
+    # the road centreline by half-width + a small gap, on both sides.
+    if len(hedges) < MAX_HEDGE_SEGMENTS:
+        for w in osm.ways:
             if len(hedges) >= MAX_HEDGE_SEGMENTS:
                 break
-            t0 = i / n_seg
-            t1 = (i + 1) / n_seg
-            p0 = line.interpolate(t0, normalized=True)
-            p1 = line.interpolate(t1, normalized=True)
-            cx, cy = (p0.x + p1.x) / 2, (p0.y + p1.y) / 2
-            if abs(cx) > half or abs(cy) > half:
+            tags = w.get("tags") or {}
+            hwy = tags.get("highway")
+            cfg = _ROAD_CLASSES_WITH_HEDGES.get(hwy)
+            if cfg is None:
                 continue
-            seg_len = float(p0.distance(p1))
-            yaw = float(np.arctan2(p1.y - p0.y, p1.x - p0.x))
-            z = _z_at(heightmap_m, region.side_m, cx, cy)
-            width_m = 0.6 if tags.get("barrier") == "fence" else 0.9
-            height_m = 0.9 if tags.get("barrier") == "fence" else 1.6
-            hedges.append(HedgeSegment(
-                x=cx, y=cy, z=z, length_m=seg_len,
-                width_m=width_m, height_m=height_m, yaw=yaw,
-            ))
-        if len(hedges) >= MAX_HEDGE_SEGMENTS:
-            break
+            # Skip roads in built-up areas (residential streets in town
+            # centres usually don't have hedges) — heuristic: if the
+            # immediate vicinity is mostly buildings, skip.
+            line_ll = way_line_ll(w, osm.nodes)
+            line = _project_line(line_ll, cx_world, cy_world)
+            if line is None or line.length < 5.0:
+                continue
+            # Offset both sides
+            offset_dist = cfg["width"] / 2.0 + cfg["hedge_offset"]
+            try:
+                left = line.parallel_offset(offset_dist, "left", join_style=2)
+                right = line.parallel_offset(offset_dist, "right", join_style=2)
+            except Exception:
+                continue
+            for off in (left, right):
+                if off is None or off.is_empty:
+                    continue
+                # parallel_offset can return MultiLineString
+                geoms = [off] if hasattr(off, "coords") else list(getattr(off, "geoms", []))
+                for g in geoms:
+                    try:
+                        if g.length < 4.0:
+                            continue
+                        _emit_along_line(g, width_m=0.9, height_m=1.4)
+                    except Exception:
+                        continue
 
     return FoliageResult(
         trees=trees,

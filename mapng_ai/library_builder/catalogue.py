@@ -26,7 +26,11 @@ class CatalogueEntry:
     target_polycount: int = 6_000   # how detailed Meshy should make the mesh
 
 
-_NI_BG = "Northern Ireland rural style, weathered exterior, realistic, exterior only, daylight"
+_NI_BG = (
+    "stylized game-ready low-poly building with painted facade textures, "
+    "clean topology, simple block geometry, weathered exterior, "
+    "Northern Ireland rural style, exterior only, daylight, white background"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -72,15 +76,21 @@ BUILDINGS: list[CatalogueEntry] = [
 # ---------------------------------------------------------------------------
 # 2 trees — broadleaf + conifer
 # ---------------------------------------------------------------------------
+_TREE_BG = (
+    "stylized game-ready low-poly tree, chunky textured bark trunk, "
+    "alpha-cutout layered leaf canopy in cross-pattern paddle shape, "
+    "clean clean topology, white background, daylight, ready for video game placement"
+)
+
 TREES: list[CatalogueEntry] = [
     # Trees are billboarded beyond ~600 m and there are 1000+ instances per
     # map — keep them tiny. 1.5K-2K is plenty for the 250 close GLB clones.
     CatalogueEntry("tree", "oak", "tree_oak",
-                   "a low poly mature oak tree, simple foliage, isolated, transparent background",
-                   footprint_m=(8, 8), levels=1, target_polycount=2_000),
+                   f"mature oak tree with broad leafy canopy, {_TREE_BG}",
+                   footprint_m=(8, 8), levels=1, target_polycount=1_500),
     CatalogueEntry("tree", "spruce", "tree_sitka_spruce",
-                   "a low poly tall sitka spruce conifer, simple foliage, isolated",
-                   footprint_m=(5, 5), levels=1, target_polycount=1_500),
+                   f"tall sitka spruce conifer with conical canopy, {_TREE_BG}",
+                   footprint_m=(5, 5), levels=1, target_polycount=1_200),
 ]
 
 
