@@ -182,6 +182,7 @@ def decimate_glb(src_path: Path, dst_path: Path, target_triangles: int) -> Path:
 
         verts32 = np.ascontiguousarray(welded.vertices, dtype=np.float32)
         faces32 = np.ascontiguousarray(welded.faces, dtype=np.int32)
+        verts32 = np.nan_to_num(verts32, nan=0.0, posinf=0.0, neginf=0.0)
 
         try:
             new_pts, new_faces, collapses = fs.simplify(
@@ -192,18 +193,25 @@ def decimate_glb(src_path: Path, dst_path: Path, target_triangles: int) -> Path:
             new_scene.add_geometry(geom, geom_name=name)
             continue
 
+        # Strip any NaN/inf the simplifier introduced — JSON serialisation
+        # in pygltflib chokes on them.
+        new_pts = np.nan_to_num(new_pts, nan=0.0, posinf=0.0, neginf=0.0)
+
         new_visual = welded.visual
         # Replay UVs if the welded mesh has them
         try:
             uv = getattr(welded.visual, "uv", None)
             if uv is not None and len(uv) == len(verts32):
+                # Pad to 3D and sanitise inputs (Meshy occasionally emits NaN UVs)
+                uv_clean = np.nan_to_num(np.asarray(uv, dtype=np.float32),
+                                         nan=0.0, posinf=0.0, neginf=0.0)
                 uv_padded = np.column_stack([
-                    uv[:, 0].astype(np.float32),
-                    uv[:, 1].astype(np.float32),
-                    np.zeros(len(uv), dtype=np.float32),
+                    uv_clean[:, 0],
+                    uv_clean[:, 1],
+                    np.zeros(len(uv_clean), dtype=np.float32),
                 ])
                 new_uv_padded, _, _ = fs.replay_simplification(uv_padded, faces32, collapses)
-                new_uv = new_uv_padded[:, :2]
+                new_uv = np.nan_to_num(new_uv_padded[:, :2], nan=0.0, posinf=0.0, neginf=0.0)
                 new_visual = trimesh.visual.TextureVisuals(
                     uv=new_uv, material=welded.visual.material,
                 )
