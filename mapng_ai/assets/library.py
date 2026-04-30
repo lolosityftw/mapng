@@ -172,6 +172,19 @@ class LibraryProvider:
             if t in self._index and self._index[t]:
                 candidates = self._index[t]
                 break
+
+        # Universal fallback: if the alias chain produced nothing, pick from
+        # ANY non-empty type folder we have. Avoids dropping back to the
+        # placeholder box for OSM tags that aren't in the alias map. The pick
+        # is deterministic by (seed, building_type) so the same building gets
+        # the same substitute on repeat runs.
+        if not candidates:
+            all_entries: list[_LibraryEntry] = [
+                e for entries in self._index.values() for e in entries
+            ]
+            if all_entries:
+                rng = random.Random(seed ^ hash(building_type))
+                candidates = [rng.choice(all_entries)]
         if not candidates:
             return None
         # Pick deterministically by seed, biased toward similar floor count

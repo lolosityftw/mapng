@@ -36,13 +36,17 @@ HEDGE_SEGMENT_LEN_M = 4.0      # subdivide long hedges into ~4 m chunks
 # Highways that get synthesised hedges flanking them. Rural NI roads are
 # almost always hedge-bordered but rarely tagged barrier=hedge in OSM.
 _ROAD_CLASSES_WITH_HEDGES = {
+    "primary":       {"width": 11.0, "hedge_offset": 2.0},  # rural primaries do have hedges
     "secondary":     {"width": 9.0,  "hedge_offset": 1.5},
     "tertiary":      {"width": 8.0,  "hedge_offset": 1.5},
     "unclassified":  {"width": 7.0,  "hedge_offset": 1.2},
     "residential":   {"width": 6.5,  "hedge_offset": 1.0},
+    "living_street": {"width": 5.5,  "hedge_offset": 1.0},
+    "service":       {"width": 4.5,  "hedge_offset": 0.6},  # driveways
     "lane":          {"width": 5.0,  "hedge_offset": 0.8},
     "track":         {"width": 4.5,  "hedge_offset": 0.8},
-    # motorway / trunk / primary deliberately excluded — verges, no hedges
+    "path":          {"width": 2.0,  "hedge_offset": 0.5},
+    # motorway / trunk deliberately excluded — they have grass verges, no hedges
 }
 
 
@@ -302,11 +306,12 @@ def place_foliage(osm: OSMData, region: Region, heightmap_m: np.ndarray, *, seed
             line = _project_line(line_ll, cx_world, cy_world)
             if line is None or line.length < 5.0:
                 continue
-            # Offset both sides
+            # Offset both sides. Round joins (join_style=1) avoid the mitre
+            # overshoot that flings hedges off into space at sharp bends.
             offset_dist = cfg["width"] / 2.0 + cfg["hedge_offset"]
             try:
-                left = line.parallel_offset(offset_dist, "left", join_style=2)
-                right = line.parallel_offset(offset_dist, "right", join_style=2)
+                left = line.parallel_offset(offset_dist, "left", join_style=1)
+                right = line.parallel_offset(offset_dist, "right", join_style=1)
             except Exception:
                 continue
             for off in (left, right):
@@ -316,7 +321,7 @@ def place_foliage(osm: OSMData, region: Region, heightmap_m: np.ndarray, *, seed
                 geoms = [off] if hasattr(off, "coords") else list(getattr(off, "geoms", []))
                 for g in geoms:
                     try:
-                        if g.length < 4.0:
+                        if g.length < 3.0:
                             continue
                         _emit_along_line(g, width_m=0.9, height_m=1.4)
                     except Exception:

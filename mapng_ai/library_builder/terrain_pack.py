@@ -42,6 +42,18 @@ _CLASS_TO_SLUG: dict[str, str | None] = {
 }
 
 
+# Optional secondary slugs per class — when downloaded, the terrain shader
+# can blend between primary and secondary based on a low-frequency macro
+# noise. Yields large-scale colour/pattern variation across the terrain
+# without needing ANOTHER splat layer.
+_CLASS_TO_ALT_SLUG: dict[str, str | None] = {
+    "pasture":  "sparse_grass",       # drier, thinner — blends naturally with leafy_grass
+    "lawn":     "aerial_grass_rock",  # rougher patches in the lawn
+    "forest":   "leaves_forest_ground",
+    "earth":    "brown_mud_leaves_01",
+}
+
+
 # What we want from each asset: (json key, filename suffix, optional fallback)
 _MAPS = [
     ("Diffuse",  "diffuse"),
@@ -85,44 +97,34 @@ def has_real_pbr(class_key: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-async def _download_one(client: httpx.AsyncClient, slug: str, class_key: str,
-                         resolution: str = "1k", emit=None) -> tuple[int, int]:
-    """Download diffuse + normal + roughness for one class. Returns (got, attempted)."""
-    out_dir = PBR_CACHE / class_key
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1) Get the asset's file manifest
-    meta_url = POLYHAVEN_API.format(slug=slug)
+async def _download_slug_to(client: httpx.AsyncClient, slug: str, target_dir: Path,
+                            *, suffix_prefix: str = "", resolution: str = "1k") -> int:
+    """Download diffuse/normal/roughness for one Poly Haven slug into `target_dir`.
+    Files saved as `{suffix_prefix}diffuse.{ext}` etc. Returns downloaded count.
+    """
+    target_dir.mkdir(parents=True, exist_ok=True)
     try:
-        r = await client.get(meta_url)
+        r = await client.get(POLYHAVEN_API.format(slug=slug))
         if r.status_code >= 400:
             log.warning("polyhaven %s: %d %s", slug, r.status_code, r.text[:120])
-            if emit:
-                await emit("class:fail", {"class": class_key, "slug": slug,
-                                          "reason": f"meta {r.status_code}"})
-            return 0, 0
+            return 0
         meta = r.json()
     except Exception as exc:
         log.warning("polyhaven %s meta error: %s", slug, exc)
-        if emit:
-            await emit("class:fail", {"class": class_key, "slug": slug, "reason": str(exc)})
-        return 0, 0
+        return 0
 
     got = 0
-    attempted = 0
     for json_key, suffix in _MAPS:
         if json_key not in meta:
             continue
-        # Find the smallest-good resolution + jpg
         res_table = meta[json_key]
         chosen_res = resolution if resolution in res_table else next(iter(res_table))
         formats = res_table[chosen_res]
         url = (formats.get("jpg") or formats.get("png") or {}).get("url")
         if not url:
             continue
-        attempted += 1
         ext = ".jpg" if "jpg" in formats else ".png"
-        out_file = out_dir / f"{suffix}{ext}"
+        out_file = target_dir / f"{suffix_prefix}{suffix}{ext}"
         if out_file.exists() and out_file.stat().st_size > 0:
             got += 1
             continue
@@ -134,10 +136,72 @@ async def _download_one(client: httpx.AsyncClient, slug: str, class_key: str,
             got += 1
         except Exception as exc:
             log.warning("polyhaven %s/%s download error: %s", slug, json_key, exc)
+    return got
+
+
+def _composite_with_alt(class_key: str) -> int:
+    """If `class_key` has both primary and alt textures cached, FBM-blend them
+    in-place so the served `diffuse.jpg` / `normal.jpg` is a natural mix.
+    Returns the number of maps composited."""
+    import numpy as np
+    from PIL import Image
+    from scipy.ndimage import gaussian_filter
+
+    d = PBR_CACHE / class_key
+    if not d.exists():
+        return 0
+
+    rng = np.random.default_rng(hash(class_key) & 0xFFFFFFFF)
+    composited = 0
+    for kind in ("diffuse", "normal", "roughness"):
+        prim = next((d / f"{kind}{ext}" for ext in (".jpg", ".jpeg", ".png")
+                     if (d / f"{kind}{ext}").exists()), None)
+        alt = next((d / f"alt_{kind}{ext}" for ext in (".jpg", ".jpeg", ".png")
+                    if (d / f"alt_{kind}{ext}").exists()), None)
+        if prim is None or alt is None:
+            continue
+        try:
+            with Image.open(prim) as a_pil, Image.open(alt) as b_pil:
+                size = (max(a_pil.width, 1024), max(a_pil.height, 1024))
+                a = np.asarray(a_pil.convert("RGB").resize(size, Image.LANCZOS), dtype=np.float32)
+                b = np.asarray(b_pil.convert("RGB").resize(size, Image.LANCZOS), dtype=np.float32)
+            # FBM-style mask: smoothed white noise → continuous patches.
+            base = rng.standard_normal((size[1], size[0])).astype(np.float32)
+            mask = gaussian_filter(base, sigma=size[0] * 0.04)
+            mask -= mask.min()
+            mask /= max(mask.max(), 1e-6)
+            mask = np.power(mask, 1.4)        # bias toward primary
+            mixed = a * (1 - mask[..., None]) + b * mask[..., None]
+            mixed = np.clip(mixed, 0, 255).astype(np.uint8)
+            Image.fromarray(mixed).save(prim, optimize=True)
+            composited += 1
+        except Exception as exc:
+            log.warning("composite %s/%s failed: %s", class_key, kind, exc)
+    return composited
+
+
+async def _download_one(client: httpx.AsyncClient, slug: str, class_key: str,
+                         resolution: str = "1k", emit=None) -> tuple[int, int]:
+    """Download diffuse + normal + roughness for one class, plus an optional
+    secondary slug if defined for this class. Composites primary + alt into
+    one served file via FBM-blended mask.
+    Returns (got, attempted) for the primary slug."""
+    out_dir = PBR_CACHE / class_key
+    got = await _download_slug_to(client, slug, out_dir, resolution=resolution)
+    attempted = len(_MAPS)
+
+    alt_slug = _CLASS_TO_ALT_SLUG.get(class_key)
+    composited = 0
+    if alt_slug:
+        alt_got = await _download_slug_to(client, alt_slug, out_dir,
+                                          suffix_prefix="alt_", resolution=resolution)
+        if alt_got > 0:
+            composited = _composite_with_alt(class_key)
 
     if emit:
         await emit("class:done", {"class": class_key, "slug": slug,
-                                  "downloaded": got, "attempted": attempted})
+                                  "downloaded": got, "attempted": attempted,
+                                  "alt_slug": alt_slug, "composited": composited})
     return got, attempted
 
 
