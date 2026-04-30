@@ -50,9 +50,7 @@ BUILDINGS: list[CatalogueEntry] = [
     CatalogueEntry("building", "commercial", "ni_country_pub",
                    f"a small country pub or inn with hanging sign, painted exterior, slate roof, {_NI_BG}",
                    footprint_m=(14, 10), levels=2, target_polycount=10_000),
-    CatalogueEntry("building", "shop", "ni_village_shop",
-                   f"a single storey village shop with shopfront windows and signage, {_NI_BG}",
-                   footprint_m=(10, 8), levels=1, target_polycount=7_000),
+    # Village shop dropped — OSM shop=* falls back to commercial via alias chain.
 
     CatalogueEntry("building", "civic", "ni_parish_church",
                    f"a small parish church with stone walls, slate roof, modest belltower, {_NI_BG}",
@@ -64,11 +62,9 @@ BUILDINGS: list[CatalogueEntry] = [
     CatalogueEntry("building", "barn", "ni_stone_barn",
                    f"a traditional stone barn with corrugated metal roof, weathered wooden door, {_NI_BG}",
                    footprint_m=(12, 7), levels=1, target_polycount=5_000),
-    CatalogueEntry("building", "shed", "ni_machinery_shed",
-                   f"an open-fronted three-bay machinery shed with corrugated metal roof, {_NI_BG}",
-                   footprint_m=(18, 9), levels=1, target_polycount=4_000),
-    # Industrial shed dropped from the catalogue (rare in pure rural NI bboxes;
-    # OSM industrial=yes falls back to ni_machinery_shed via the type aliases)
+    # Machinery shed + industrial shed dropped — OSM shed=* / industrial=*
+    # alias to barn via library.py's type chain, so they fall back to
+    # ni_stone_barn rather than getting placeholder boxes.
 ]
 
 
