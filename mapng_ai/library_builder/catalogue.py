@@ -73,12 +73,14 @@ BUILDINGS: list[CatalogueEntry] = [
 # 2 trees — broadleaf + conifer
 # ---------------------------------------------------------------------------
 TREES: list[CatalogueEntry] = [
+    # Trees are billboarded beyond ~600 m and there are 1000+ instances per
+    # map — keep them tiny. 1.5K-2K is plenty for the 250 close GLB clones.
     CatalogueEntry("tree", "oak", "tree_oak",
-                   "a single mature oak tree, full leaf, isolated on grass, realistic, daylight",
-                   footprint_m=(8, 8), levels=1, target_polycount=4_000),
+                   "a low poly mature oak tree, simple foliage, isolated, transparent background",
+                   footprint_m=(8, 8), levels=1, target_polycount=2_000),
     CatalogueEntry("tree", "spruce", "tree_sitka_spruce",
-                   "a tall sitka spruce conifer, isolated, plantation style, realistic, daylight",
-                   footprint_m=(5, 5), levels=1, target_polycount=3_500),
+                   "a low poly tall sitka spruce conifer, simple foliage, isolated",
+                   footprint_m=(5, 5), levels=1, target_polycount=1_500),
 ]
 
 

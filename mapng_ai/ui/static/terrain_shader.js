@@ -24,6 +24,7 @@ const VERT = `
 `;
 
 const FRAG = `
+  #extension GL_OES_standard_derivatives : enable
   precision highp float;
   varying vec2 vUv;
   varying vec3 vWorldPos;
@@ -105,7 +106,15 @@ const FRAG = `
     float macro = vnoise(vWorldPos.xz * macroBlendFreq);
     albedo *= mix(0.85, 1.10, macro);
 
-    vec3 N = normalize(vNormal + vec3(nLocal.x, 0.0, nLocal.y) * 0.6);
+    // Compute the actual surface normal from screen-space position derivatives.
+    // Independent of the geometry attribute → fixes any winding issues and
+    // gives real per-fragment hill shading from the displaced heightmap.
+    vec3 dposX = dFdx(vWorldPos);
+    vec3 dposY = dFdy(vWorldPos);
+    vec3 faceN = normalize(cross(dposY, dposX));
+    if (faceN.y < 0.0) faceN = -faceN;        // ensure pointing up
+
+    vec3 N = normalize(faceN + vec3(nLocal.x, 0.0, nLocal.y) * 0.6);
     vec3 L = normalize(sunDir);
     float lambert = max(dot(N, L), 0.0);
     float wrap = clamp(dot(N, L) * 0.5 + 0.5, 0.0, 1.0);
