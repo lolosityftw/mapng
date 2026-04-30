@@ -122,6 +122,92 @@ async def library_page() -> HTMLResponse:
     return HTMLResponse(html, headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
+@app.get("/library/textures")
+async def textures_page() -> HTMLResponse:
+    html = (config.TEMPLATES_DIR / "textures.html").read_text(encoding="utf-8")
+    html = html.replace("__BUILD__", BUILD_ID)
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache, must-revalidate"})
+
+
+# ---- Ground texture studio --------------------------------------------------
+@app.get("/api/library/ground-textures")
+async def list_ground_textures() -> dict:
+    """Return per-class status of diffuse/normal/roughness ground textures."""
+    from mapng_ai.library_builder.terrain_pack import _CLASS_TO_SLUG, pbr_set
+    from PIL import Image
+    out = []
+    for class_key, slug in _CLASS_TO_SLUG.items():
+        s = pbr_set(class_key)
+        maps = {}
+        for kind in ("diffuse", "normal", "roughness"):
+            p = getattr(s, kind, None)
+            if p and p.exists():
+                w = h = 0
+                try:
+                    with Image.open(p) as img:
+                        w, h = img.size
+                except Exception:
+                    pass
+                # Source: 'custom' if file ends in .png and was uploaded; we
+                # mark all PNGs as custom (Poly Haven gives JPG)
+                source = "custom" if p.suffix.lower() == ".png" else "polyhaven"
+                maps[kind] = {
+                    "url": f"/api/pbr/{class_key}/{kind}",
+                    "size": p.stat().st_size,
+                    "width": w, "height": h,
+                    "source": source,
+                }
+            else:
+                maps[kind] = {"url": None, "source": "missing"}
+        out.append({"class": class_key, "slug": slug, "maps": maps})
+    return {"classes": out}
+
+
+@app.post("/api/library/ground-textures/{class_key}/{map_kind}")
+async def upload_ground_texture(class_key: str, map_kind: str,
+                                 file: UploadFile = File(...)) -> dict:
+    """Replace a class's ground texture with an uploaded image. PNG only
+    (preserves precision; JPG would be re-encoded). Files saved alongside
+    the existing Poly Haven JPGs in cache/pbr/<class>/."""
+    from mapng_ai.library_builder.terrain_pack import _CLASS_TO_SLUG, PBR_CACHE
+    if class_key not in _CLASS_TO_SLUG:
+        raise HTTPException(404, f"unknown class: {class_key}")
+    if map_kind not in ("diffuse", "normal", "roughness"):
+        raise HTTPException(400, "map_kind must be diffuse|normal|roughness")
+    body = await file.read()
+    if not body:
+        raise HTTPException(400, "empty file")
+
+    target_dir_p = PBR_CACHE / class_key
+    target_dir_p.mkdir(parents=True, exist_ok=True)
+    # Remove any existing variants (jpg + png) so the new one wins
+    for ext in (".jpg", ".jpeg", ".png"):
+        for stale in target_dir_p.glob(f"{map_kind}{ext}"):
+            try: stale.unlink()
+            except Exception: pass
+    target = target_dir_p / f"{map_kind}.png"
+    target.write_bytes(body)
+    return {
+        "class": class_key, "map_kind": map_kind,
+        "saved_bytes": len(body),
+        "url": f"/api/pbr/{class_key}/{map_kind}",
+    }
+
+
+@app.delete("/api/library/ground-textures/{class_key}")
+async def reset_ground_textures(class_key: str) -> dict:
+    """Drop all custom textures for a class so the next pack download
+    re-fetches from Poly Haven."""
+    from mapng_ai.library_builder.terrain_pack import _CLASS_TO_SLUG, PBR_CACHE
+    if class_key not in _CLASS_TO_SLUG:
+        raise HTTPException(404, f"unknown class: {class_key}")
+    d = PBR_CACHE / class_key
+    if d.exists():
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+    return {"class": class_key, "reset": True}
+
+
 @app.get("/api/health")
 async def health() -> dict:
     return {"ok": True, "version": app.version}

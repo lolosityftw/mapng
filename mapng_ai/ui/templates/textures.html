@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>MapNG-AI · Ground Textures</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="/static/library.css?v=__BUILD__" />
+<link rel="stylesheet" href="/static/textures.css?v=__BUILD__" />
+</head>
+<body>
+
+<header>
+  <div class="header-left">
+    <h1>Ground Texture Studio</h1>
+    <span class="region-pill">Rural Ireland</span>
+  </div>
+  <div class="header-right">
+    <a href="/library" class="ghost-link">← Library</a>
+    <a href="/" class="ghost-link">← Map</a>
+  </div>
+</header>
+
+<section id="bar">
+  <div class="filters">
+    <small id="textures-summary" class="hint">…</small>
+  </div>
+  <div class="actions">
+    <button id="reset-all" class="ghost" title="Re-download all classes from Poly Haven">Reset all to Poly Haven</button>
+  </div>
+</section>
+
+<main class="textures-main">
+  <div id="texture-grid" class="texture-grid"></div>
+</main>
+
+<input id="upload-input" type="file" accept="image/*" hidden />
+<script type="module" src="/static/textures.js?v=__BUILD__"></script>
+</body>
+</html>
