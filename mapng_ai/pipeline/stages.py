@@ -297,8 +297,16 @@ async def stage_place(ctx: JobContext, emit: Emit) -> None:
 async def stage_export(ctx: JobContext, emit: Emit) -> None:
     assert ctx.heightmap and ctx.region
     level_name = f"mapng_{ctx.job_id}"
+
+    # Prefer the detailed terrain composite (satellite + per-class PBR tiles)
+    # over the raw satellite for BeamNG's wide-area diffuse — it gives the
+    # in-game terrain a head-start on detail before BeamNG's own per-material
+    # blending kicks in. Falls back to the satellite if no PBR tiles, then
+    # to None (procedural blend).
     terrain_png = None
-    if ctx.imagery is not None:
+    if ctx.splat and ctx.splat.detailed_diffuse_path is not None:
+        terrain_png = ctx.splat.detailed_diffuse_path.read_bytes()
+    elif ctx.imagery is not None:
         terrain_png = ctx.imagery.sat_png_path.read_bytes()
 
     pkg = await asyncio.to_thread(
