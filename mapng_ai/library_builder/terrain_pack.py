@@ -170,7 +170,12 @@ def _composite_with_alt(class_key: str) -> int:
             mask = gaussian_filter(base, sigma=size[0] * 0.04)
             mask -= mask.min()
             mask /= max(mask.max(), 1e-6)
-            mask = np.power(mask, 1.4)        # bias toward primary
+            # Strong bias toward primary — the alt should contribute small
+            # patches of variation, not dominate the look. ^3 makes most of
+            # the mask near zero with rare bumps.
+            mask = np.power(mask, 3.0)
+            # Cap alt contribution at 35 % to keep the lush primary visible.
+            mask = np.clip(mask * 0.35, 0, 1)
             mixed = a * (1 - mask[..., None]) + b * mask[..., None]
             mixed = np.clip(mixed, 0, 255).astype(np.uint8)
             Image.fromarray(mixed).save(prim, optimize=True)

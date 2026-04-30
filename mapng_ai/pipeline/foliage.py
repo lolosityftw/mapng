@@ -291,6 +291,58 @@ def place_foliage(osm: OSMData, region: Region, heightmap_m: np.ndarray, *, seed
     # always have hedges either side but they're rarely tagged. We offset
     # the road centreline by half-width + a small gap, on both sides.
     if len(hedges) < MAX_HEDGE_SEGMENTS:
+        # Pre-compute the union of all road CARRIAGEWAYS as a no-hedge zone.
+        # This stops hedges from piling up at intersections — each road
+        # independently lays its offset, but we'd get clumps where
+        # multiple roads converge. The union excludes those overlap zones.
+        from shapely.ops import unary_union
+        carriageway_polys = []
+        for w2 in osm.ways:
+            tags2 = w2.get("tags") or {}
+            hwy2 = tags2.get("highway")
+            cfg2 = _ROAD_CLASSES_WITH_HEDGES.get(hwy2)
+            if cfg2 is None:
+                continue
+            line_ll2 = way_line_ll(w2, osm.nodes)
+            line2 = _project_line(line_ll2, cx_world, cy_world)
+            if line2 is None or line2.length < 1.0:
+                continue
+            # Buffer by carriageway half-width (slightly tightened so we
+            # don't erase too aggressively at curves).
+            try:
+                carriageway_polys.append(line2.buffer(cfg2["width"] / 2.0 * 0.95))
+            except Exception:
+                continue
+        no_hedge_zone = unary_union(carriageway_polys) if carriageway_polys else None
+
+        def _emit_along_line_clipped(g, *, width_m, height_m):
+            """Emit hedge segments along g, skipping any segment whose midpoint
+            falls inside the no-hedge zone (road carriageway union)."""
+            if g.length < 3.0:
+                return
+            n_seg = max(1, int(np.ceil(g.length / HEDGE_SEGMENT_LEN_M)))
+            for i in range(n_seg):
+                if len(hedges) >= MAX_HEDGE_SEGMENTS:
+                    return
+                t0, t1 = i / n_seg, (i + 1) / n_seg
+                p0 = g.interpolate(t0, normalized=True)
+                p1 = g.interpolate(t1, normalized=True)
+                cx, cy = (p0.x + p1.x) / 2, (p0.y + p1.y) / 2
+                # Drop segments inside the road network (junctions, lay-bys)
+                if no_hedge_zone is not None:
+                    from shapely.geometry import Point
+                    if no_hedge_zone.contains(Point(cx, cy)):
+                        continue
+                if abs(cx) > half or abs(cy) > half:
+                    continue
+                seg_len = float(p0.distance(p1))
+                yaw = float(np.arctan2(p1.y - p0.y, p1.x - p0.x))
+                z = _z_at(heightmap_m, region.side_m, cx, cy)
+                hedges.append(HedgeSegment(
+                    x=cx, y=cy, z=z, length_m=seg_len,
+                    width_m=width_m, height_m=height_m, yaw=yaw,
+                ))
+
         for w in osm.ways:
             if len(hedges) >= MAX_HEDGE_SEGMENTS:
                 break
@@ -299,15 +351,10 @@ def place_foliage(osm: OSMData, region: Region, heightmap_m: np.ndarray, *, seed
             cfg = _ROAD_CLASSES_WITH_HEDGES.get(hwy)
             if cfg is None:
                 continue
-            # Skip roads in built-up areas (residential streets in town
-            # centres usually don't have hedges) — heuristic: if the
-            # immediate vicinity is mostly buildings, skip.
             line_ll = way_line_ll(w, osm.nodes)
             line = _project_line(line_ll, cx_world, cy_world)
             if line is None or line.length < 5.0:
                 continue
-            # Offset both sides. Round joins (join_style=1) avoid the mitre
-            # overshoot that flings hedges off into space at sharp bends.
             offset_dist = cfg["width"] / 2.0 + cfg["hedge_offset"]
             try:
                 left = line.parallel_offset(offset_dist, "left", join_style=1)
@@ -317,13 +364,10 @@ def place_foliage(osm: OSMData, region: Region, heightmap_m: np.ndarray, *, seed
             for off in (left, right):
                 if off is None or off.is_empty:
                     continue
-                # parallel_offset can return MultiLineString
                 geoms = [off] if hasattr(off, "coords") else list(getattr(off, "geoms", []))
                 for g in geoms:
                     try:
-                        if g.length < 3.0:
-                            continue
-                        _emit_along_line(g, width_m=0.9, height_m=1.4)
+                        _emit_along_line_clipped(g, width_m=0.9, height_m=1.4)
                     except Exception:
                         continue
 
