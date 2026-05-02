@@ -31,6 +31,7 @@ from PIL import Image
 
 from mapng_ai import config
 from mapng_ai.assets.placeholder import (
+    _TYPE_COLORS, _ROOF_COLORS,
     write_hedge_dae, write_pitched_dae, write_tree_dae, write_wall_dae,
     write_fence_dae, write_gate_dae,
 )
@@ -41,6 +42,63 @@ from mapng_ai.pipeline.decal_roads import (
 from mapng_ai.pipeline.foliage import FoliageResult, HedgeSegment, TreePlacement
 from mapng_ai.pipeline.placement import BuildingPlacement
 from mapng_ai.pipeline.splatting import SplatResult
+
+
+# ---------------------------------------------------------------------------
+# Shape / foliage material definitions
+# ---------------------------------------------------------------------------
+
+def _hex_to_float3(h: str) -> list[float]:
+    h = h.lstrip("#")
+    return [int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0, int(h[4:6], 16) / 255.0]
+
+
+def _shape_materials_json(level_name: str) -> dict:
+    """BeamNG Material definitions for every MapNG_* name referenced in DAE files.
+
+    BeamNG's TSStatic renderer ignores embedded COLLADA <library_effects> colors
+    and looks up material names in its own database by 'mapTo'. If not found it
+    renders the 'NO' checker. We define solid-color PBR materials for every
+    unique name our COLLADA writer emits.
+    """
+    white = f"levels/{level_name}/art/white.png"
+
+    def _mat(name: str, hex_color: str) -> dict:
+        r, g, b = _hex_to_float3(hex_color)
+        return {
+            "mapTo": name,
+            "class": "Material",
+            "roughnessValue": 0.85,
+            "metallicValue": 0.0,
+            "Stages": [{
+                "baseColorMap": white,
+                "baseColorFactor": [r, g, b, 1.0],
+            }, {}, {}, {}],
+        }
+
+    mats: dict = {}
+    for btype, wall_hex in _TYPE_COLORS.items():
+        roof_hex = _ROOF_COLORS.get(btype, _ROOF_COLORS["default"])
+        mats[f"MapNG_bld_{btype}_wall"] = _mat(f"MapNG_bld_{btype}_wall", wall_hex)
+        mats[f"MapNG_bld_{btype}_roof"] = _mat(f"MapNG_bld_{btype}_roof", roof_hex)
+    # Ensure default variant exists
+    mats["MapNG_bld_default_wall"] = _mat("MapNG_bld_default_wall", _TYPE_COLORS["default"])
+    mats["MapNG_bld_default_roof"] = _mat("MapNG_bld_default_roof", _ROOF_COLORS["default"])
+    # Foliage / boundary
+    mats["MapNG_hedge"]       = _mat("MapNG_hedge",       "#3F5A28")
+    mats["MapNG_wall"]        = _mat("MapNG_wall",        "#8A8479")
+    mats["MapNG_fence"]       = _mat("MapNG_fence",       "#5C4A2C")
+    mats["MapNG_gate"]        = _mat("MapNG_gate",        "#6E5530")
+    mats["MapNG_shed"]        = _mat("MapNG_shed",        "#7A7A75")
+    mats["MapNG_tree_trunk"]  = _mat("MapNG_tree_trunk",  "#5D4037")
+    mats["MapNG_tree_canopy"] = _mat("MapNG_tree_canopy", "#2E7D32")
+    return mats
+
+
+def _white_png_1x1() -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGBA", (1, 1), (255, 255, 255, 255)).save(buf, format="PNG")
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -172,10 +230,15 @@ def _main_level_lua(level_name: str, foreign_levels: list[str]) -> str:
         "end\n"
         "\n"
         "local function onClientStartMission(levelPath)\n"
-        f"  loadMaterialsFromDir('/levels/{level_name}/art/')\n"
+        "  -- Load this level's materials (levelPath = '/levels/{name}' without trailing /)\n"
+        "  loadMaterialsFromDir(levelPath .. '/art/')\n"
+        f"  loadMaterialsFromDir('/levels/{level_name}/')\n"
         "  for _, name in ipairs(foreignLevels) do\n"
         "    loadMaterialsFromDir('/levels/' .. name .. '/art/')\n"
         "  end\n"
+        "  -- Force terrain to re-apply material assignments after we loaded them\n"
+        "  local terrain = scenetree.findObject('theTerrain')\n"
+        "  if terrain then terrain:reloadMaterials() end\n"
         "end\n"
         "\n"
         "local function onUpdate() end\n"
@@ -669,10 +732,12 @@ def write_level_package(
     w(f"{base}/theTerrain.terrainheightmap.png", _heightmap_visual_png(heightmap_m))
 
     # ------------------------------------------------------------------
-    # Terrain materials
+    # Terrain materials — written at BOTH level root (for early auto-discovery
+    # before scene objects are instantiated) and art/ subdir (conventional)
     # ------------------------------------------------------------------
-    w(f"{base}/art/terrains/main.materials.json",
-      json.dumps(_terrain_materials_json(level_name, side_m, splat), indent=2))
+    terrain_mats_json = json.dumps(_terrain_materials_json(level_name, side_m, splat), indent=2)
+    w(f"{base}/terrain.materials.json", terrain_mats_json)
+    w(f"{base}/art/terrains/main.materials.json", terrain_mats_json)
 
     # Per-class PBR diffuse + optional normal/roughness + opacity mask
     if splat is not None:
@@ -699,13 +764,23 @@ def write_level_package(
         w(f"{base}/art/terrains/terrain.png", _flat_terrain_png())
 
     # ------------------------------------------------------------------
-    # Road textures + materials
+    # Road textures + materials (also at level root for early auto-discovery)
     # ------------------------------------------------------------------
     if decal_roads:
         w(f"{base}/art/road/road_decal.png", write_road_decal_texture().read_bytes())
         w(f"{base}/art/road/drive_decal.png", write_drive_decal_texture().read_bytes())
-        w(f"{base}/art/road/main.materials.json",
-          json.dumps(_road_materials_json(level_name), indent=2))
+        road_mats_json = json.dumps(_road_materials_json(level_name), indent=2)
+        w(f"{base}/road.materials.json", road_mats_json)
+        w(f"{base}/art/road/main.materials.json", road_mats_json)
+
+    # ------------------------------------------------------------------
+    # Shape / foliage materials + white 1×1 texture
+    # BeamNG ignores embedded COLLADA colors; every MapNG_* material symbol
+    # referenced in a DAE must exist in the material database.
+    # ------------------------------------------------------------------
+    w(f"{base}/art/white.png", _white_png_1x1())
+    w(f"{base}/shapes.materials.json",
+      json.dumps(_shape_materials_json(level_name), indent=2))
 
     # ------------------------------------------------------------------
     # Building shapes
