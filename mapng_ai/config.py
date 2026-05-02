@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -18,8 +19,8 @@ WORKING_CRS = "EPSG:2157"  # Irish Transverse Mercator
 DEFAULT_HEIGHTMAP_SIZE = 2048
 DEFAULT_BBOX_SIZE_M = 2000
 
-HOST = "127.0.0.1"
-PORT = 8000
+HOST = os.environ.get("HOST", "127.0.0.1")
+PORT = int(os.environ.get("PORT", "8000"))
 
 
 def ensure_runtime_dirs() -> None:

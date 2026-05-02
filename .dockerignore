@@ -1,0 +1,10 @@
+.venv/
+.git/
+.claude/
+__pycache__/
+*.pyc
+*.pyo
+output/
+mapng_ai/cache/
+.env
+*.zip
