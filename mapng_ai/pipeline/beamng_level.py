@@ -153,7 +153,7 @@ def _terrain_materials_json(level_name: str, side_m: float,
 # mainLevel.lua
 # ---------------------------------------------------------------------------
 
-def _main_level_lua(foreign_levels: list[str]) -> str:
+def _main_level_lua(level_name: str, foreign_levels: list[str]) -> str:
     if foreign_levels:
         levels_lua = "{\n" + "\n".join(f"  '{name}'," for name in foreign_levels) + "\n}"
     else:
@@ -164,18 +164,18 @@ def _main_level_lua(foreign_levels: list[str]) -> str:
         "\n"
         f"local foreignLevels = {levels_lua}\n"
         "\n"
-        "local function loadForeignMaterials()\n"
-        "  for _, name in ipairs(foreignLevels) do\n"
-        "    local files = FS:findFiles('/levels/' .. name .. '/art/',\n"
-        "                               '*.materials.json', -1, true, false)\n"
-        "    for _, filename in ipairs(files) do\n"
-        "      loadJsonMaterialsFile(filename)\n"
-        "    end\n"
+        "local function loadMaterialsFromDir(dir)\n"
+        "  local files = FS:findFiles(dir, '*.materials.json', -1, true, false)\n"
+        "  for _, filename in ipairs(files) do\n"
+        "    loadJsonMaterialsFile(filename)\n"
         "  end\n"
         "end\n"
         "\n"
         "local function onClientStartMission(levelPath)\n"
-        "  loadForeignMaterials()\n"
+        f"  loadMaterialsFromDir('/levels/{level_name}/art/')\n"
+        "  for _, name in ipairs(foreignLevels) do\n"
+        "    loadMaterialsFromDir('/levels/' .. name .. '/art/')\n"
+        "  end\n"
         "end\n"
         "\n"
         "local function onUpdate() end\n"
@@ -398,13 +398,13 @@ def _level_objects(level_name: str, size_m: float, size_px: int,
             "azimuth": 230,
             "elevation": 45,
             "ambientScale":      [0.55, 0.55, 0.55, 1],
-            "colorize":          [0.42, 0.61, 0.87, 1],
-            "colorizeAmount":    2,
-            "fogScale":          [0.69, 0.85, 0.99, 1],
-            "sunScale":          [1, 0.90, 0.83, 1],
+            "colorize":          [1, 1, 1, 1],
+            "colorizeAmount":    0,
+            "fogScale":          [1, 1, 1, 1],
+            "sunScale":          [1, 1, 1, 1],
             "enableFogFallBack": False,
-            "exposure":          15,
-            "flareScale": 5,
+            "exposure":          1.0,
+            "flareScale": 1,
             "flareType": "BNG_SunFlare_3",
             "lastSplitTerrainOnly": True,
             "logWeight": 0.99,
@@ -412,7 +412,7 @@ def _level_objects(level_name: str, size_m: float, size_px: int,
             "rayleighScattering": 0.01,
             "shadowDistance": 1600,
             "shadowSoftness": 0.2,
-            "skyBrightness": 40,
+            "skyBrightness": 12,
             "texSize": 1024,
         },
         {
@@ -657,7 +657,7 @@ def write_level_package(
             if rel.startswith("levels/") and "/" in rel[len("levels/"):]:
                 foreign_levels.add(rel[len("levels/"):].split("/", 1)[0])
     foreign_levels.discard(level_name)
-    w(f"{base}/mainLevel.lua", _main_level_lua(sorted(foreign_levels)))
+    w(f"{base}/mainLevel.lua", _main_level_lua(level_name, sorted(foreign_levels)))
     w(f"{base}/preview.png", _solid_preview_png())
 
     # ------------------------------------------------------------------

@@ -1,17 +1,14 @@
-"""PlaceholderProvider — what v1 ships per spec §5.2.
+"""PlaceholderProvider — generates per-type unit DAE files (1×1×1 m).
 
-Generates *per-type* unit DAE files (1×1×1 m) with vertex colours baked into
-the mesh. This is critical: TSStatic in BeamNG can't easily override colour
-per instance, so to get residential/commercial/industrial colour distinctions
-in-game we ship a separate DAE per type. Cached on disk so we only build them
-once per session.
+Uses raw COLLADA XML with unique MapNG_* material names to prevent BeamNG from
+resolving generic names like 'material_0' against textures from other installed
+levels (which causes kanji/Asian DLC textures to appear on generated buildings).
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
-
-import numpy as np
-import trimesh
+from typing import Sequence
 
 from mapng_ai import config
 from mapng_ai.assets.base import AssetProvider, BuildingAsset
@@ -56,124 +53,320 @@ _ROOF_COLORS: dict[str, str] = {
     "default":     "#444444",
 }
 
-
-def _hex_to_rgba(h: str, a: int = 255) -> list[int]:
-    h = h.lstrip("#")
-    return [int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), a]
-
-
 _FLAT_ROOF_TYPES: frozenset[str] = frozenset({
     "industrial", "warehouse", "garage", "shed", "barn",
     "commercial", "retail", "shop", "office",
 })
 
 
+def _hex_to_rgba(h: str, a: int = 255) -> list[int]:
+    h = h.lstrip("#")
+    return [int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), a]
+
+
+def _hex_to_float3(h: str) -> tuple[float, float, float]:
+    r, g, b, _ = _hex_to_rgba(h)
+    return r / 255.0, g / 255.0, b / 255.0
+
+
 # ---------------------------------------------------------------------------
-# Pitched-roof box: 1×1×1 unit shape; the BeamNG TSStatic scales per instance
+# Raw COLLADA writer — avoids trimesh's generic material names
 # ---------------------------------------------------------------------------
-def _build_pitched_box(wall_rgba: list[int], roof_rgba: list[int],
-                        flat_roof: bool = False) -> trimesh.Trimesh:
+
+def _write_collada(
+    path: Path,
+    verts: Sequence[tuple[float, float, float]],
+    faces: Sequence[tuple[int, int, int]],
+    face_mat_ids: Sequence[int],
+    materials: list[tuple[str, tuple[float, float, float]]],
+) -> None:
+    """Write a minimal COLLADA (.dae) file with per-face materials.
+
+    materials: list of (mat_name, (r,g,b)) — names must be globally unique
+    face_mat_ids: index into materials for each face
+    """
+    n_mats = len(materials)
+
+    # Build per-material face lists
+    mat_faces: list[list[tuple[int, int, int]]] = [[] for _ in range(n_mats)]
+    for tri, mid in zip(faces, face_mat_ids):
+        mat_faces[mid].append(tri)
+
+    def _vf(x: float) -> str:
+        return f"{x:.6f}"
+
+    positions_str = " ".join(
+        f"{_vf(v[0])} {_vf(v[1])} {_vf(v[2])}" for v in verts
+    )
+
+    # effects
+    effects_xml = ""
+    for name, (r, g, b) in materials:
+        effects_xml += (
+            f'  <effect id="{name}-effect">\n'
+            f'    <profile_COMMON>\n'
+            f'      <technique sid="common">\n'
+            f'        <lambert>\n'
+            f'          <diffuse><color>{_vf(r)} {_vf(g)} {_vf(b)} 1</color></diffuse>\n'
+            f'        </lambert>\n'
+            f'      </technique>\n'
+            f'    </profile_COMMON>\n'
+            f'  </effect>\n'
+        )
+
+    # materials
+    mats_xml = ""
+    for name, _ in materials:
+        mats_xml += (
+            f'  <material id="{name}" name="{name}">\n'
+            f'    <instance_effect url="#{name}-effect"/>\n'
+            f'  </material>\n'
+        )
+
+    n_verts = len(verts)
+    geom_id = "mesh0"
+    pos_src = f"{geom_id}-positions"
+
+    # geometry — all faces in one mesh, per-material polylist
+    polylists_xml = ""
+    for mid, (name, _) in enumerate(materials):
+        tris = mat_faces[mid]
+        if not tris:
+            continue
+        count = len(tris)
+        pdata = " ".join(f"{a} {b} {c}" for a, b, c in tris)
+        polylists_xml += (
+            f'      <triangles material="{name}" count="{count}">\n'
+            f'        <input semantic="VERTEX" source="#mesh0-vertices" offset="0"/>\n'
+            f'        <p>{pdata}</p>\n'
+            f'      </triangles>\n'
+        )
+
+    # instance_material bindings
+    bindings_xml = ""
+    for name, _ in materials:
+        if mat_faces[materials.index((name, materials[[m[0] for m in materials].index(name)][1]))]:
+            bindings_xml += (
+                f'          <instance_material symbol="{name}" target="#{name}"/>\n'
+            )
+
+    # Simpler binding generation
+    bindings_xml = ""
+    for mid, (name, _) in enumerate(materials):
+        if mat_faces[mid]:
+            bindings_xml += (
+                f'          <instance_material symbol="{name}" target="#{name}"/>\n'
+            )
+
+    dae = f"""<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset><up_axis>Z_UP</up_axis></asset>
+  <library_effects>
+{effects_xml}  </library_effects>
+  <library_materials>
+{mats_xml}  </library_materials>
+  <library_geometries>
+    <geometry id="{geom_id}" name="{geom_id}">
+      <mesh>
+        <source id="{pos_src}">
+          <float_array id="{pos_src}-array" count="{n_verts * 3}">{positions_str}</float_array>
+          <technique_common>
+            <accessor source="#{pos_src}-array" count="{n_verts}" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="{geom_id}-vertices">
+          <input semantic="POSITION" source="#{pos_src}"/>
+        </vertices>
+{polylists_xml}      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="Mesh" name="Mesh" type="NODE">
+        <instance_geometry url="#{geom_id}">
+          <bind_material><technique_common>
+{bindings_xml}          </technique_common></bind_material>
+        </instance_geometry>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene><instance_visual_scene url="#Scene"/></scene>
+</COLLADA>
+"""
+    path.write_text(dae, encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Building geometry builders
+# ---------------------------------------------------------------------------
+
+def _pitched_box_collada(path: Path, wall_hex: str, roof_hex: str,
+                          flat_roof: bool, mat_name: str) -> None:
     box_h = 1.0 if flat_roof else 0.7
-    # For flat-roof buildings the "ridge" verts collapse to box-top corners
     ridge_z = box_h if flat_roof else 1.0
-    verts = np.array([
-        [-0.5, -0.5, 0],          # 0  SW base
-        [ 0.5, -0.5, 0],          # 1  SE base
-        [ 0.5,  0.5, 0],          # 2  NE base
-        [-0.5,  0.5, 0],          # 3  NW base
-        [-0.5, -0.5, box_h],      # 4  SW top of box
-        [ 0.5, -0.5, box_h],      # 5  SE top
-        [ 0.5,  0.5, box_h],      # 6  NE top
-        [-0.5,  0.5, box_h],      # 7  NW top
-        [-0.5,  0.0, ridge_z],    # 8  W ridge (= box top at midline if flat)
-        [ 0.5,  0.0, ridge_z],    # 9  E ridge
-    ], dtype=np.float64)
 
-    # Each tuple = (face indices, is_roof?)
-    walls = [
-        ([0, 2, 1], False), ([0, 3, 2], False),    # base
-        ([0, 1, 5], False), ([0, 5, 4], False),    # south wall
-        ([1, 2, 6], False), ([1, 6, 5], False),    # east wall
-        ([2, 3, 7], False), ([2, 7, 6], False),    # north wall
-        ([3, 0, 4], False), ([3, 4, 7], False),    # west wall
-        ([4, 8, 7], False), ([4, 5, 9], False),    # west / east gables (split below)
-        ([5, 9, 6], False),                         # east gable triangle 1
-        ([6, 9, 8], True), ([6, 8, 7], True),       # north roof slope
-        ([4, 9, 8], True), ([4, 5, 9], True),       # south roof slope (overrides gable east)
+    verts: list[tuple[float, float, float]] = [
+        (-0.5, -0.5, 0),      # 0 SW base
+        ( 0.5, -0.5, 0),      # 1 SE base
+        ( 0.5,  0.5, 0),      # 2 NE base
+        (-0.5,  0.5, 0),      # 3 NW base
+        (-0.5, -0.5, box_h),  # 4 SW top
+        ( 0.5, -0.5, box_h),  # 5 SE top
+        ( 0.5,  0.5, box_h),  # 6 NE top
+        (-0.5,  0.5, box_h),  # 7 NW top
+        (-0.5,  0.0, ridge_z),# 8 W ridge
+        ( 0.5,  0.0, ridge_z),# 9 E ridge
     ]
-    # The duplicated [4,5,9] above is a typo from my note-taking — drop it
-    # by rebuilding the face list cleanly:
-    faces_clean: list[tuple[list[int], bool]] = [
-        # base + walls
-        ([0, 2, 1], False), ([0, 3, 2], False),
-        ([0, 1, 5], False), ([0, 5, 4], False),
-        ([1, 2, 6], False), ([1, 6, 5], False),
-        ([2, 3, 7], False), ([2, 7, 6], False),
-        ([3, 0, 4], False), ([3, 4, 7], False),
-        # gables (triangular tops of the box at the ridge ends)
-        ([4, 8, 7], False),    # west gable
-        ([5, 6, 9], False),    # east gable
-        # roof
-        ([4, 5, 9], True), ([4, 9, 8], True),  # south slope
-        ([7, 9, 6], True), ([7, 8, 9], True),  # north slope
-    ]
-    faces = np.array([f for f, _ in faces_clean], dtype=np.int64)
-    is_roof = np.array([r for _, r in faces_clean], dtype=bool)
 
-    mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
-    colours = np.tile(np.array(wall_rgba, dtype=np.uint8), (len(faces), 1))
-    colours[is_roof] = roof_rgba
-    mesh.visual.face_colors = colours
-    return mesh
+    WALL, ROOF = 0, 1
+    faces: list[tuple[int, int, int]] = [
+        (0, 2, 1), (0, 3, 2),        # base
+        (0, 1, 5), (0, 5, 4),        # south wall
+        (1, 2, 6), (1, 6, 5),        # east wall
+        (2, 3, 7), (2, 7, 6),        # north wall
+        (3, 0, 4), (3, 4, 7),        # west wall
+        (4, 8, 7),                   # west gable
+        (5, 6, 9),                   # east gable
+        (4, 5, 9), (4, 9, 8),        # south roof slope
+        (7, 9, 6), (7, 8, 9),        # north roof slope
+    ]
+    # gables are WALL colour, roof slopes are ROOF colour
+    mids: list[int] = [
+        WALL, WALL,
+        WALL, WALL,
+        WALL, WALL,
+        WALL, WALL,
+        WALL, WALL,
+        WALL,        # west gable
+        WALL,        # east gable
+        ROOF, ROOF,  # south slope
+        ROOF, ROOF,  # north slope
+    ]
+
+    wall_mat = f"{mat_name}_wall"
+    roof_mat = f"{mat_name}_roof"
+    materials = [
+        (wall_mat, _hex_to_float3(wall_hex)),
+        (roof_mat, _hex_to_float3(roof_hex)),
+    ]
+    _write_collada(path, verts, faces, mids, materials)
+
+
+# ---------------------------------------------------------------------------
+# Foliage geometry
+# ---------------------------------------------------------------------------
+
+def _slab_collada(path: Path, hex_color: str, mat_name: str,
+                  cx: float = 0.0, cy: float = 0.0, cz: float = 0.5) -> None:
+    """Unit box (1×1×1) centred at (cx, cy, cz)."""
+    hx, hy, hz = 0.5, 0.5, 0.5
+    verts: list[tuple[float, float, float]] = [
+        (cx - hx, cy - hy, cz - hz),  # 0
+        (cx + hx, cy - hy, cz - hz),  # 1
+        (cx + hx, cy + hy, cz - hz),  # 2
+        (cx - hx, cy + hy, cz - hz),  # 3
+        (cx - hx, cy - hy, cz + hz),  # 4
+        (cx + hx, cy - hy, cz + hz),  # 5
+        (cx + hx, cy + hy, cz + hz),  # 6
+        (cx - hx, cy + hy, cz + hz),  # 7
+    ]
+    faces: list[tuple[int, int, int]] = [
+        (0, 2, 1), (0, 3, 2),  # bottom
+        (4, 5, 6), (4, 6, 7),  # top
+        (0, 1, 5), (0, 5, 4),  # front
+        (1, 2, 6), (1, 6, 5),  # right
+        (2, 3, 7), (2, 7, 6),  # back
+        (3, 0, 4), (3, 4, 7),  # left
+    ]
+    mids = [0] * len(faces)
+    _write_collada(path, verts, faces, mids,
+                   [(mat_name, _hex_to_float3(hex_color))])
+
+
+def _tree_collada(path: Path) -> None:
+    """Cylinder trunk + cone canopy."""
+    trunk_r = 0.05
+    trunk_h = 0.3
+    canopy_r = 0.35
+    canopy_h = 0.7
+    segs = 8
+
+    verts: list[tuple[float, float, float]] = []
+    faces: list[tuple[int, int, int]] = []
+    mids: list[int] = []
+
+    # trunk — ring at z=0, ring at z=trunk_h + caps
+    base_centre = len(verts)
+    verts.append((0, 0, 0))
+    base_ring = len(verts)
+    for i in range(segs):
+        a = 2 * math.pi * i / segs
+        verts.append((trunk_r * math.cos(a), trunk_r * math.sin(a), 0.0))
+    top_ring = len(verts)
+    for i in range(segs):
+        a = 2 * math.pi * i / segs
+        verts.append((trunk_r * math.cos(a), trunk_r * math.sin(a), trunk_h))
+    top_centre = len(verts)
+    verts.append((0, 0, trunk_h))
+
+    TRUNK, CANOPY = 0, 1
+    for i in range(segs):
+        n = (i + 1) % segs
+        # bottom cap
+        faces.append((base_centre, base_ring + n, base_ring + i))
+        mids.append(TRUNK)
+        # side quad
+        faces.append((base_ring + i, base_ring + n, top_ring + n))
+        mids.append(TRUNK)
+        faces.append((base_ring + i, top_ring + n, top_ring + i))
+        mids.append(TRUNK)
+        # top cap
+        faces.append((top_centre, top_ring + i, top_ring + n))
+        mids.append(TRUNK)
+
+    # canopy cone — base ring + apex
+    canopy_base_centre = len(verts)
+    verts.append((0, 0, trunk_h))
+    canopy_base_ring = len(verts)
+    for i in range(segs):
+        a = 2 * math.pi * i / segs
+        verts.append((canopy_r * math.cos(a), canopy_r * math.sin(a), trunk_h))
+    apex = len(verts)
+    verts.append((0, 0, trunk_h + canopy_h))
+
+    for i in range(segs):
+        n = (i + 1) % segs
+        # base cap
+        faces.append((canopy_base_centre, canopy_base_ring + i, canopy_base_ring + n))
+        mids.append(CANOPY)
+        # side
+        faces.append((canopy_base_ring + i, apex, canopy_base_ring + n))
+        mids.append(CANOPY)
+
+    _write_collada(
+        path, verts, faces, mids,
+        [
+            ("MapNG_tree_trunk", _hex_to_float3("#5D4037")),
+            ("MapNG_tree_canopy", _hex_to_float3("#2E7D32")),
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public write functions (cached)
+# ---------------------------------------------------------------------------
+
+def _cache_dir() -> Path:
+    d = config.CACHE_DIR / "shapes"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 _PITCHED_DIR_REL = "art/shapes/buildings"
-
-
-def _pitched_path_for(building_type: str) -> tuple[Path, str]:
-    """Return (cache filesystem path, relative path inside the level zip)."""
-    key = building_type if building_type in _TYPE_COLORS else "default"
-    rel = f"{_PITCHED_DIR_REL}/building_{key}.dae"
-    cache_dir = config.CACHE_DIR / "shapes"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir / f"building_{key}.dae", rel
-
-
-def write_pitched_dae(building_type: str) -> tuple[Path, str]:
-    """Write the per-type DAE (idempotent). Returns (fs_path, zip_relpath)."""
-    cache_path, rel = _pitched_path_for(building_type)
-    if cache_path.exists():
-        return cache_path, rel
-    wall = _hex_to_rgba(_TYPE_COLORS.get(building_type, _TYPE_COLORS["default"]))
-    roof = _hex_to_rgba(_ROOF_COLORS.get(building_type, _ROOF_COLORS["default"]))
-    flat = building_type in _FLAT_ROOF_TYPES
-    mesh = _build_pitched_box(wall, roof, flat_roof=flat)
-    mesh.export(cache_path)
-    return cache_path, rel
-
-
-# ---------------------------------------------------------------------------
-# Tree: cylinder trunk + cone canopy, 1 m tall (placement scales by height)
-# ---------------------------------------------------------------------------
-def _build_tree(seed: int) -> trimesh.Trimesh:
-    rng = np.random.default_rng(seed)
-    trunk_radius = 0.04 + rng.random() * 0.02
-    trunk_height = 0.3 + rng.random() * 0.1
-    canopy_radius = 0.32 + rng.random() * 0.08
-    canopy_height = 1.0 - trunk_height
-    trunk = trimesh.creation.cylinder(
-        radius=trunk_radius, height=trunk_height, sections=8,
-        transform=trimesh.transformations.translation_matrix([0, 0, trunk_height / 2]),
-    )
-    trunk.visual.face_colors = _hex_to_rgba("#5D4037")
-    canopy = trimesh.creation.cone(
-        radius=canopy_radius, height=canopy_height, sections=10,
-        transform=trimesh.transformations.translation_matrix([0, 0, trunk_height]),
-    )
-    canopy.visual.face_colors = _hex_to_rgba("#2E7D32")
-    return trimesh.util.concatenate([trunk, canopy])
-
-
 _TREE_REL = "art/shapes/foliage/tree.dae"
 _HEDGE_REL = "art/shapes/foliage/hedge.dae"
 _WALL_REL = "art/shapes/foliage/wall.dae"
@@ -182,84 +375,77 @@ _GATE_REL = "art/shapes/foliage/gate.dae"
 _SHED_REL = "art/shapes/buildings/shed.dae"
 
 
+def _pitched_path_for(building_type: str) -> tuple[Path, str]:
+    key = building_type if building_type in _TYPE_COLORS else "default"
+    rel = f"{_PITCHED_DIR_REL}/building_{key}.dae"
+    return _cache_dir() / f"building_{key}.dae", rel
+
+
+def _is_mapng_dae(p: Path) -> bool:
+    """Return True only if the file was written by our COLLADA writer."""
+    if not p.exists():
+        return False
+    try:
+        return b"MapNG_" in p.read_bytes()[:2048]
+    except OSError:
+        return False
+
+
+def write_pitched_dae(building_type: str) -> tuple[Path, str]:
+    cache_path, rel = _pitched_path_for(building_type)
+    if _is_mapng_dae(cache_path):
+        return cache_path, rel
+    key = building_type if building_type in _TYPE_COLORS else "default"
+    mat_name = f"MapNG_bld_{key}"
+    _pitched_box_collada(
+        cache_path,
+        wall_hex=_TYPE_COLORS.get(key, _TYPE_COLORS["default"]),
+        roof_hex=_ROOF_COLORS.get(key, _ROOF_COLORS["default"]),
+        flat_roof=key in _FLAT_ROOF_TYPES,
+        mat_name=mat_name,
+    )
+    return cache_path, rel
+
+
 def write_tree_dae() -> tuple[Path, str]:
-    cache_dir = config.CACHE_DIR / "shapes"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = cache_dir / "tree.dae"
-    if not cache_path.exists():
-        mesh = _build_tree(seed=1)
-        mesh.export(cache_path)
+    cache_path = _cache_dir() / "tree.dae"
+    if not _is_mapng_dae(cache_path):
+        _tree_collada(cache_path)
     return cache_path, _TREE_REL
 
 
 def write_hedge_dae() -> tuple[Path, str]:
-    """A 1×1×1 unit hedge slab — placement scales X by segment length, Z by height."""
-    cache_dir = config.CACHE_DIR / "shapes"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = cache_dir / "hedge.dae"
-    if not cache_path.exists():
-        # Slightly rounded slab via a box with subdivision and per-vertex Y offset
-        slab = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
-        slab.apply_translation([0, 0, 0.5])
-        # Tint dark hedge green
-        slab.visual.face_colors = _hex_to_rgba("#3F5A28")
-        slab.export(cache_path)
+    cache_path = _cache_dir() / "hedge.dae"
+    if not _is_mapng_dae(cache_path):
+        _slab_collada(cache_path, "#3F5A28", "MapNG_hedge")
     return cache_path, _HEDGE_REL
 
 
 def write_wall_dae() -> tuple[Path, str]:
-    """A 1×1×1 unit drystone-wall slab — same scaling convention as the
-    hedge but tinted weathered grey so a TSStatic referencing this DAE
-    in BeamNG reads as stone, not vegetation."""
-    cache_dir = config.CACHE_DIR / "shapes"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = cache_dir / "wall.dae"
-    if not cache_path.exists():
-        slab = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
-        slab.apply_translation([0, 0, 0.5])
-        slab.visual.face_colors = _hex_to_rgba("#8A8479")
-        slab.export(cache_path)
+    cache_path = _cache_dir() / "wall.dae"
+    if not _is_mapng_dae(cache_path):
+        _slab_collada(cache_path, "#8A8479", "MapNG_wall")
     return cache_path, _WALL_REL
 
 
 def write_fence_dae() -> tuple[Path, str]:
-    """Thin post-and-rail fence — 1×1×1 unit; placement scales X by length,
-    Z by height. Coloured weathered timber so it reads as a fence."""
-    cache_dir = config.CACHE_DIR / "shapes"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = cache_dir / "fence.dae"
-    if not cache_path.exists():
-        slab = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
-        slab.apply_translation([0, 0, 0.5])
-        slab.visual.face_colors = _hex_to_rgba("#5C4A2C")
-        slab.export(cache_path)
+    cache_path = _cache_dir() / "fence.dae"
+    if not _is_mapng_dae(cache_path):
+        _slab_collada(cache_path, "#5C4A2C", "MapNG_fence")
     return cache_path, _FENCE_REL
 
 
 def write_gate_dae() -> tuple[Path, str]:
-    """Wooden farm gate — short squat panel sized 4×0.1×1.3 m. Placed at
-    the spot where a hedge meets a road."""
-    cache_dir = config.CACHE_DIR / "shapes"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = cache_dir / "gate.dae"
-    if not cache_path.exists():
-        slab = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
-        slab.apply_translation([0, 0, 0.5])
-        slab.visual.face_colors = _hex_to_rgba("#6E5530")
-        slab.export(cache_path)
+    cache_path = _cache_dir() / "gate.dae"
+    if not _is_mapng_dae(cache_path):
+        _slab_collada(cache_path, "#6E5530", "MapNG_gate")
     return cache_path, _GATE_REL
 
 
 def write_shed_dae() -> tuple[Path, str]:
-    """Small farmyard shed — flat-roofed 1×1×1 unit, corrugated grey."""
-    cache_dir = config.CACHE_DIR / "shapes"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = cache_dir / "shed.dae"
-    if not cache_path.exists():
-        slab = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
-        slab.apply_translation([0, 0, 0.5])
-        slab.visual.face_colors = _hex_to_rgba("#7A7A75")
-        slab.export(cache_path)
+    cache_path = _cache_dir() / "shed.dae"
+    if not _is_mapng_dae(cache_path):
+        _slab_collada(cache_path, "#7A7A75", "MapNG_shed")
     return cache_path, _SHED_REL
 
 
