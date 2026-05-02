@@ -1,11 +1,6 @@
-FROM python:3.11-slim
+FROM python:3.11
 
 WORKDIR /app
-
-# Build tools needed by some wheels (scipy, fast-simplification)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc g++ \
-    && rm -rf /var/lib/apt/lists/*
 
 # Install Python deps before copying source so this layer is cached
 COPY pyproject.toml .
@@ -30,11 +25,11 @@ RUN pip install --no-cache-dir \
 
 COPY . .
 
-# Writable dirs for job output and texture cache
 RUN mkdir -p /app/output /app/mapng_ai/cache
 
 ENV HOST=0.0.0.0
 ENV PORT=8000
+ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 
