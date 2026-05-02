@@ -53,6 +53,11 @@ def _hex_to_float3(h: str) -> list[float]:
     return [int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0, int(h[4:6], 16) / 255.0]
 
 
+def _stable_pid(seed: str) -> str:
+    """Deterministic UUID for materials so reload doesn't create duplicates."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"mapng:material:{seed}"))
+
+
 def _shape_materials_json(level_name: str) -> dict:
     """BeamNG Material definitions for every MapNG_* name referenced in DAE files.
 
@@ -66,10 +71,12 @@ def _shape_materials_json(level_name: str) -> dict:
     def _mat(name: str, hex_color: str) -> dict:
         r, g, b = _hex_to_float3(hex_color)
         return {
+            "name": name,
             "mapTo": name,
             "class": "Material",
             "roughnessValue": 0.85,
             "metallicValue": 0.0,
+            "persistentId": _stable_pid(f"{level_name}/shape/{name}"),
             "Stages": [{
                 "baseColorMap": white,
                 "baseColorFactor": [r, g, b, 1.0],
@@ -175,12 +182,14 @@ def _terrain_materials_json(level_name: str, side_m: float,
     if splat is None:
         return {
             "DefaultMaterial": {
+                "name": "DefaultMaterial",
                 "mapTo": "DefaultMaterial",
                 "class": "TerrainMaterial",
                 "internalName": "DefaultMaterial",
                 "diffuseMap": f"levels/{level_name}/art/terrains/terrain.png",
                 "diffuseSize": int(side_m),
                 "groundmodelName": "ASPHALT",
+                "persistentId": _stable_pid(f"{level_name}/terrain/DefaultMaterial"),
             },
         }
 
@@ -188,13 +197,16 @@ def _terrain_materials_json(level_name: str, side_m: float,
     for layer in splat.layers:
         key = layer.cls.key
         ext = layer.diffuse_path.suffix.lower()
+        name = f"mat_{key}"
         mat: dict = {
-            "mapTo": f"mat_{key}",
+            "name": name,
+            "mapTo": name,
             "class": "TerrainMaterial",
-            "internalName": f"mat_{key}",
+            "internalName": name,
             "diffuseMap": f"levels/{level_name}/art/terrains/diffuse_{key}{ext}",
             "diffuseSize": 4,
             "groundmodelName": _GROUNDMODELS.get(key, "GRASS"),
+            "persistentId": _stable_pid(f"{level_name}/terrain/{name}"),
         }
         if layer.normal_path is not None:
             ne = layer.normal_path.suffix.lower()
@@ -203,7 +215,7 @@ def _terrain_materials_json(level_name: str, side_m: float,
             re_ = layer.roughness_path.suffix.lower()
             mat["specularMap"] = f"levels/{level_name}/art/terrains/rough_{key}{re_}"
             mat["specularPower"] = 16
-        out[f"mat_{key}"] = mat
+        out[name] = mat
     return out
 
 
@@ -230,9 +242,8 @@ def _main_level_lua(level_name: str, foreign_levels: list[str]) -> str:
         "end\n"
         "\n"
         "local function onClientStartMission(levelPath)\n"
-        "  -- Load this level's materials (levelPath = '/levels/{name}' without trailing /)\n"
-        "  loadMaterialsFromDir(levelPath .. '/art/')\n"
         f"  loadMaterialsFromDir('/levels/{level_name}/')\n"
+        f"  loadMaterialsFromDir('/levels/{level_name}/art/')\n"
         "  for _, name in ipairs(foreignLevels) do\n"
         "    loadMaterialsFromDir('/levels/' .. name .. '/art/')\n"
         "  end\n"
@@ -256,11 +267,13 @@ def _main_level_lua(level_name: str, foreign_levels: list[str]) -> str:
 def _road_materials_json(level_name: str) -> dict:
     def _mat(name: str, tex_path: str) -> dict:
         return {
+            "name": name,
             "mapTo": name,
             "class": "Material",
             "translucent": True,
             "translucentBlendOp": "PreMulAlpha",
             "alphaRef": 0,
+            "persistentId": _stable_pid(f"{level_name}/road/{name}"),
             "Stages": [
                 {
                     "baseColorMap": tex_path,
