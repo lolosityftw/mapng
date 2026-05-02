@@ -27,7 +27,16 @@ class Region:
     heightmap_size: int         # output texel count per side
 
 
-def resolve_region(bbox: BBoxLL, target_size_m: float = 2000.0, heightmap_size: int = 2048) -> Region:
+def resolve_region(bbox: BBoxLL, target_size_m: float | None = None,
+                   heightmap_size: int = 2048,
+                   *, min_side_m: float = 500.0, max_side_m: float = 8000.0) -> Region:
+    """Convert a lat/lon bbox into the square ITM working area.
+
+    Side length: by default we use the LARGER of the bbox's projected
+    width or height in metres (clamped to [min_side_m, max_side_m]) so the
+    user's drawn rectangle determines the level size. Pass an explicit
+    `target_size_m` to override.
+    """
     # 1) Reproject corners to ITM
     xs, ys = _TO_ITM.transform(
         [bbox.west, bbox.east], [bbox.south, bbox.north]
@@ -35,7 +44,13 @@ def resolve_region(bbox: BBoxLL, target_size_m: float = 2000.0, heightmap_size: 
     cx = (xs[0] + xs[1]) / 2
     cy = (ys[0] + ys[1]) / 2
 
-    # 2) Snap to a square of side `target_size_m` centred on the user's centroid
+    # 2) Decide side: explicit override OR the larger drawn dimension.
+    if target_size_m is None:
+        width_m  = abs(xs[1] - xs[0])
+        height_m = abs(ys[1] - ys[0])
+        target_size_m = max(width_m, height_m)
+    target_size_m = max(min_side_m, min(max_side_m, target_size_m))
+
     half = target_size_m / 2
     working = BBoxITM(west=cx - half, south=cy - half, east=cx + half, north=cy + half)
 
@@ -62,3 +77,21 @@ def resolve_region(bbox: BBoxLL, target_size_m: float = 2000.0, heightmap_size: 
 def itm_to_ll_bbox(b: BBoxITM) -> BBoxLL:
     lons, lats = _TO_LL.transform([b.west, b.east, b.west, b.east], [b.south, b.south, b.north, b.north])
     return BBoxLL(west=min(lons), south=min(lats), east=max(lons), north=max(lats))
+
+
+def sample_terrain_height(heightmap_m, side_m: float, x_m: float, y_m: float) -> float:
+    """Bilinear-ish sample of the terrain heightmap at world XY (origin at
+    terrain centre). Lives here so every placement stage references one
+    canonical implementation; previously copies in foliage/decal_roads/
+    placement could drift out of sync.
+
+    Heightmap is `(size, size)` numpy with row 0 = NORTH (image space).
+    """
+    size = heightmap_m.shape[0]
+    half = side_m / 2
+    # Clip then convert to fractional pixel
+    u = max(0.0, min(1.0, (x_m + half) / side_m))
+    v = max(0.0, min(1.0, 1.0 - (y_m + half) / side_m))
+    col = int(round(u * (size - 1)))
+    row = int(round(v * (size - 1)))
+    return float(heightmap_m[row, col])

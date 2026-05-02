@@ -79,6 +79,31 @@ def expand_fill(
     return out, filled_mask
 
 
+def _add_micro_relief(arr: np.ndarray, *, seed: str,
+                      slow_amp: float = 0.06, fast_amp: float = 0.025) -> np.ndarray:
+    """Add small-scale FBM noise on top of the DTM. `slow_amp` ≈ 6 cm,
+    `fast_amp` ≈ 2.5 cm — well below typical road camber so it doesn't
+    affect drivable surfaces, but visible enough that grass fields stop
+    reading as a perfect plane.
+    """
+    from scipy.ndimage import gaussian_filter
+    h, w = arr.shape
+    # Deterministic seed from the heightmap cache key so re-running is stable.
+    rng = np.random.default_rng(int.from_bytes(seed.encode()[:8], "little") & 0xFFFFFFFF)
+    base_slow = rng.standard_normal((h, w)).astype(np.float32)
+    base_fast = rng.standard_normal((h, w)).astype(np.float32)
+    # Sigmas in pixels — slow is ~8 px (≈ 8m at 1m/pixel) and fast is ~2 px
+    slow = gaussian_filter(base_slow, sigma=8.0)
+    fast = gaussian_filter(base_fast, sigma=2.0)
+    # Normalise to roughly ±1
+    def _norm(a):
+        s = max(a.std(), 1e-6)
+        return a / (s * 2.5)
+    slow = _norm(slow)
+    fast = _norm(fast)
+    return arr + slow * slow_amp + fast * fast_amp
+
+
 def relax_filled(
     arr: np.ndarray, filled_mask: np.ndarray, iterations: int = 80, tension: float = 0.5
 ) -> np.ndarray:
@@ -207,6 +232,16 @@ def build_heightmap(tile: ElevationTile, region: Region, out_dir: Path) -> Heigh
         dst_crs="EPSG:2157",
         resampling=Resampling.bilinear,
     )
+
+    # 2b) Micro-relief injection. The DTM (especially Terrarium @ ~9m)
+    # is too smooth — fields read as poker-flat in the preview. Adding a
+    # small multi-octave FBM bump (~5cm slow + ~3cm fast) gives a real
+    # rolling-ground feel without disturbing macro topography. Amplitude
+    # is intentionally tiny so it doesn't interfere with road grades.
+    try:
+        dst = _add_micro_relief(dst, seed=_cache_key(region))
+    except Exception:
+        pass
 
     # 3) Write artefacts
     min_m = float(dst.min())

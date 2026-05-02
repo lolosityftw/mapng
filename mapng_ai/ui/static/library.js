@@ -30,13 +30,10 @@ const els = {
   fSort: document.getElementById("f-sort"),
   fSearch: document.getElementById("f-search"),
   activeQuality: document.getElementById("active-quality"),
-  meshyPolycount: document.getElementById("meshy-polycount"),
-  buildMissing: document.getElementById("build-missing"),
-  buildAll: document.getElementById("build-all"),
+  importPack: document.getElementById("import-pack"),
+  importPackInput: document.getElementById("import-pack-input"),
   bakeActive: document.getElementById("bake-active"),
   bakeAll: document.getElementById("bake-all"),
-  regenBuildings: document.getElementById("regen-buildings"),
-  regenTrees: document.getElementById("regen-trees"),
   terrainPack: document.getElementById("terrain-pack"),
   body: document.getElementById("entries-body"),
   batchStatus: document.getElementById("batch-status"),
@@ -64,6 +61,14 @@ const els = {
   preview3d: document.getElementById("preview3d"),
   qualityTabs: document.getElementById("quality-tabs"),
   previewMeta: document.getElementById("preview-meta"),
+  bn: {
+    state: document.getElementById("bn-state"),
+    path: document.getElementById("bn-path"),
+    count: document.getElementById("bn-count"),
+    byCat: document.getElementById("bn-by-cat"),
+    byLvl: document.getElementById("bn-by-lvl"),
+    rescan: document.getElementById("bn-rescan"),
+  },
 };
 
 // Order matters — display this left-to-right
@@ -135,13 +140,14 @@ function renderTable() {
       selectEntry(tr.dataset.slug);
     });
   });
+  // Per-row action buttons: drag-drop GLB onto an entry (file picker)
   els.body.querySelectorAll("button[data-action]").forEach((b) => {
     b.addEventListener("click", (ev) => {
       ev.stopPropagation();
       const slug = b.closest("tr").dataset.slug;
-      const action = b.dataset.action;
-      if (action === "build") buildOne(slug, false);
-      if (action === "rebuild") buildOne(slug, true);
+      selectEntry(slug);
+      // Trigger the per-entry GLB file picker (lives in the detail pane)
+      els.d.file?.click();
     });
   });
 }
@@ -159,9 +165,8 @@ function stateIcon(e) {
   return "○";
 }
 function rowActionButton(e) {
-  if (e._running) return `<button disabled>building…</button>`;
-  if (e.built)    return `<button class="ghost" data-action="rebuild">Rebuild</button>`;
-  return `<button class="primary" data-action="build">Build</button>`;
+  if (e.built) return `<button class="ghost" data-action="replace">Replace</button>`;
+  return `<button class="primary" data-action="upload">Upload</button>`;
 }
 function fmtBytes(n) {
   if (!n) return "";
@@ -173,9 +178,6 @@ function fmtBytes(n) {
 function updateStatus() {
   const built = state.entries.filter((e) => e.built).length;
   els.status.textContent = `${built} / ${state.entries.length} built`;
-  // Reflect total catalogue count on the 'Generate all' button
-  const cnt = document.getElementById("build-all-count");
-  if (cnt) cnt.textContent = `(${state.entries.length})`;
 }
 
 // ---------------------------------------------------------------------------
@@ -200,8 +202,8 @@ function selectEntry(slug) {
                             : e._failed ? "failed"
                             : e.built ? "built ✓"
                             : "missing";
-  els.d.generate.hidden = e.built || e._running;
-  els.d.regenerate.hidden = !e.built;
+  if (els.d.generate)   els.d.generate.hidden = true;     // generation removed
+  if (els.d.regenerate) els.d.regenerate.hidden = true;
   els.d.bake.hidden = !e.built;
   els.d.delete.hidden = !e.built;
   loadPreview(e);
@@ -464,107 +466,20 @@ async function loadPreview(e, quality) {
 }
 
 // ---------------------------------------------------------------------------
-// Build actions (single + bulk)
+// Asset library is populated via drag-drop GLB onto an entry, the
+// 'Import asset pack' bulk zip importer, or the BeamNG asset reference
+// mode (export-only).  Per-entry / bulk Meshy generation has been removed.
 // ---------------------------------------------------------------------------
-function setRunning(slug, running) {
-  const e = state.entries.find((x) => x.slug === slug);
-  if (!e) return;
-  e._running = running;
-  if (running) e._failed = false;
-  renderTable();
-  if (state.selectedSlug === slug) selectEntry(slug);
-}
-
-function markBuilt(slug, sizeBytes) {
-  const e = state.entries.find((x) => x.slug === slug);
-  if (!e) return;
-  e.built = true;
-  e._running = false;
-  e._failed = false;
-  if (sizeBytes) e.size_bytes = sizeBytes;
-  renderTable();
-  updateStatus();
-  if (state.selectedSlug === slug) selectEntry(slug);
-}
-
-function markFailed(slug) {
-  const e = state.entries.find((x) => x.slug === slug);
-  if (!e) return;
-  e._running = false;
-  e._failed = true;
-  renderTable();
-  if (state.selectedSlug === slug) selectEntry(slug);
-}
-
-async function buildOne(slug, force) {
-  setRunning(slug, true);
-  try {
-    const r = await fetch("/api/library/build/single", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ slug, force }),
-    });
-    const { job_id } = await r.json();
-    streamJob(job_id, true);
-  } catch (err) {
-    setRunning(slug, false);
-    markFailed(slug);
-  }
-}
-
-async function buildBatch(force = false, categories = null) {
-  // Snapshot which slugs are about to run so we can mark them
-  const targets = state.entries.filter((e) =>
-    (categories === null || categories.includes(e.category)) && (force || !e.built),
-  );
-  for (const t of targets) setRunning(t.slug, true);
-
-  const r = await fetch("/api/library/build", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ force, categories }),
-  });
-  const { job_id } = await r.json();
-  streamJob(job_id, false);
-}
-
-function streamJob(jobId, isSingle) {
+function _legacyJobStreamPlaceholder(jobId, isSingle) {
   if (state.liveJob) state.liveJob.close();
   const es = new EventSource(`/api/library/jobs/${jobId}/events`);
   state.liveJob = es;
-
   els.batchStatus.hidden = false;
   els.batchStatus.classList.remove("error");
   els.batchStatus.textContent = "starting…";
-
-  es.addEventListener("batch:start", (ev) => {
-    const d = JSON.parse(ev.data);
-    els.batchStatus.textContent =
-      `building 0 / ${d.total} · concurrency ${d.concurrency} · ${d.rps} req/s · texture ${d.texture ? "on" : "off"}`;
-  });
-  es.addEventListener("entry:start", (ev) => {
-    const d = JSON.parse(ev.data);
-    setRunning(d.slug, true);
-  });
-  es.addEventListener("entry:done", (ev) => {
-    const d = JSON.parse(ev.data);
-    markBuilt(d.slug, d.size_bytes);
-    if (d.completed && d.total) {
-      els.batchStatus.textContent = `building ${d.completed} / ${d.total}`;
-    }
-  });
-  es.addEventListener("entry:skip", (ev) => {
-    const d = JSON.parse(ev.data);
-    setRunning(d.slug, false);
-  });
-  es.addEventListener("entry:fail", (ev) => {
-    const d = JSON.parse(ev.data);
-    markFailed(d.slug);
-  });
   es.addEventListener("batch:done", (ev) => {
     const d = JSON.parse(ev.data);
-    els.batchStatus.textContent =
-      `done — ${d.completed} processed, ${d.skipped} skipped, ${d.failed} failed`;
+    els.batchStatus.textContent = `done — ${JSON.stringify(d)}`;
     state.liveJob = null;
     es.close();
     setTimeout(() => { els.batchStatus.hidden = true; }, 4000);
@@ -587,26 +502,30 @@ els.fBuilt.addEventListener("change", () => { state.filter.built = els.fBuilt.va
 els.fSort.addEventListener("change", () => { state.sort = els.fSort.value; renderTable(); });
 els.fSearch.addEventListener("input", () => { state.filter.search = els.fSearch.value.trim(); renderTable(); });
 
-els.buildMissing.addEventListener("click", () => buildBatch(false));
-els.buildAll.addEventListener("click", () => {
-  const n = state.entries.length;
-  const cap = parseInt(els.meshyPolycount?.value || "0", 10) || 0;
-  const capStr = cap ? `at ${cap.toLocaleString()} tris` : "at catalogue defaults";
-  if (confirm(`Generate all ${n} entries ${capStr}? Regenerates EVERY entry via Meshy and burns credits.`)) {
-    buildBatch(true);
+// ---- Pack import ------------------------------------------------------------
+els.importPack?.addEventListener("click", () => els.importPackInput?.click());
+els.importPackInput?.addEventListener("change", async () => {
+  const file = els.importPackInput.files?.[0];
+  els.importPackInput.value = "";
+  if (!file) return;
+  els.batchStatus.hidden = false;
+  els.batchStatus.classList.remove("error");
+  els.batchStatus.textContent = `importing ${file.name}…`;
+  try {
+    const fd = new FormData();
+    fd.append("file", file);
+    const r = await fetch("/api/library/import-pack", { method: "POST", body: fd });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    els.batchStatus.textContent =
+      `imported ${data.imported || 0} GLBs from ${file.name} (${data.skipped || 0} skipped)`;
+    loadCatalogue();
+    setTimeout(() => { els.batchStatus.hidden = true; }, 5000);
+  } catch (err) {
+    els.batchStatus.classList.add("error");
+    els.batchStatus.textContent = `import failed: ${err}`;
   }
 });
-
-function _regenCategoryConfirm(category, label) {
-  const n = state.entries.filter((e) => e.category === category).length;
-  const cap = parseInt(els.meshyPolycount?.value || "0", 10) || 0;
-  const capStr = cap ? `at ${cap.toLocaleString()} tris` : "at catalogue defaults";
-  if (confirm(`Re-roll ${n} ${label}(s) ${capStr}? Wipes existing GLBs + cached optimised variants. Burns Meshy credits.`)) {
-    buildBatch(true, [category]);
-  }
-}
-els.regenBuildings?.addEventListener("click", () => _regenCategoryConfirm("building", "building"));
-els.regenTrees?.addEventListener("click", () => _regenCategoryConfirm("tree", "tree"));
 
 // ---- Terrain PBR pack download (Poly Haven CC0) -----------------------------
 async function downloadTerrainPack() {
@@ -740,12 +659,10 @@ els.bakeAll.addEventListener("click", () => bakeQualities(
   ["100k", "50k", "10k", "5k", "1.5k"], els.bakeAll
 ));
 
-els.d.generate.addEventListener("click", () => buildOne(state.selectedSlug, false));
-els.d.regenerate.addEventListener("click", () => {
-  if (confirm(`Regenerate ${state.selectedSlug}? Existing cached mesh will be replaced.`)) {
-    buildOne(state.selectedSlug, true);
-  }
-});
+// Per-entry generate/regenerate buttons removed (no AI generator).
+// 'Upload' / 'Replace' buttons in the rows + per-entry drop-zone in the
+// detail pane are now the way to add a GLB.
+
 // ---- Prompt override + GLB upload (per-entry, detail pane) -----------------
 els.d.promptSave?.addEventListener("click", async () => {
   const slug = state.selectedSlug;
@@ -862,31 +779,8 @@ async function refreshActiveQuality() {
   } catch (e) {
     console.warn("active quality fetch failed", e);
   }
-  try {
-    const r = await fetch("/api/library/meshy-polycount");
-    const { polycount } = await r.json();
-    if (els.meshyPolycount) {
-      // Snap to closest known tier for the dropdown
-      const tiers = [1500, 2500, 5000, 7500, 10000, 15000, 20000];
-      const closest = tiers.reduce((a, b) =>
-        Math.abs(b - polycount) < Math.abs(a - polycount) ? b : a);
-      els.meshyPolycount.value = closest;
-    }
-  } catch (e) {
-    console.warn("polycount fetch failed", e);
-  }
 }
 
-els.meshyPolycount?.addEventListener("change", async () => {
-  const n = parseInt(els.meshyPolycount.value || "0", 10);
-  try {
-    await fetch("/api/library/meshy-polycount", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ polycount: n }),
-    });
-  } catch (e) { console.warn("set polycount failed", e); }
-});
 els.activeQuality?.addEventListener("change", async () => {
   const v = els.activeQuality.value;
   updateBakeActiveLabel();
@@ -902,7 +796,59 @@ els.activeQuality?.addEventListener("change", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// BeamNG status panel
+// ---------------------------------------------------------------------------
+function _summariseMap(m) {
+  if (!m || !Object.keys(m).length) return "—";
+  return Object.entries(m)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${k}: ${v}`)
+    .join(", ");
+}
+
+function renderBeamngStatus(s) {
+  if (!els.bn.state) return;
+  if (!s || !s.detected) {
+    els.bn.state.textContent = "not detected";
+    els.bn.state.className = "bn-state bn-state-off";
+    els.bn.path.textContent = "set MAPNG_BEAMNG_PATH or install BeamNG.drive";
+    els.bn.count.textContent = "0";
+    els.bn.byCat.textContent = "—";
+    els.bn.byLvl.textContent = "—";
+    return;
+  }
+  els.bn.state.textContent = `${s.asset_count} shapes`;
+  els.bn.state.className = "bn-state bn-state-on";
+  els.bn.path.textContent = s.path || "—";
+  els.bn.count.textContent = String(s.asset_count || 0);
+  els.bn.byCat.textContent = _summariseMap(s.by_category);
+  els.bn.byLvl.textContent = _summariseMap(s.by_level);
+}
+
+async function refreshBeamngStatus() {
+  try {
+    const r = await fetch("/api/beamng/status");
+    renderBeamngStatus(await r.json());
+  } catch (e) {
+    console.warn("beamng status fetch failed", e);
+    renderBeamngStatus(null);
+  }
+}
+
+els.bn.rescan?.addEventListener("click", async () => {
+  els.bn.state.textContent = "rescanning…";
+  try {
+    const r = await fetch("/api/beamng/rescan", { method: "POST" });
+    renderBeamngStatus(await r.json());
+  } catch (e) {
+    console.warn("beamng rescan failed", e);
+    renderBeamngStatus(null);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 loadCatalogue();
 refreshActiveQuality();
+refreshBeamngStatus();

@@ -31,17 +31,29 @@ USER_AGENT = "mapng-ai/0.1 (https://github.com/anthropics/claude-code)"
 def _query(bbox: BBoxLL) -> str:
     s, w, n, e = bbox.south, bbox.west, bbox.north, bbox.east
     bb = f"{s},{w},{n},{e}"
+    # Beefed-up query: explicitly ask for relation members + barrier/power
+    # networks + leisure (parks/pitches) so the pipeline gets in-field
+    # boundaries that simple way queries miss. Multipolygon farmland
+    # relations carry inner field outlines that ways alone don't expose.
     return f"""
-[out:json][timeout:60];
+[out:json][timeout:90];
 (
   way["building"]({bb});
   way["highway"]({bb});
   way["landuse"]({bb});
   way["natural"]({bb});
+  way["leisure"]({bb});
   way["waterway"]({bb});
+  way["barrier"]({bb});
+  way["power"]({bb});
+  way["junction"]({bb});
+
   relation["building"]({bb});
   relation["landuse"]({bb});
   relation["natural"]({bb});
+  relation["leisure"]({bb});
+  relation["waterway"]({bb});
+  relation["boundary"="land_area"]({bb});
 );
 out body;
 >;
@@ -109,6 +121,7 @@ async def fetch_osm(bbox: BBoxLL) -> OSMData:
 
     nodes: dict[int, tuple[float, float]] = {}
     ways: list[dict] = []
+    ways_by_id: dict[int, dict] = {}
     relations: list[dict] = []
     for el in raw.get("elements", []):
         t = el.get("type")
@@ -116,8 +129,37 @@ async def fetch_osm(bbox: BBoxLL) -> OSMData:
             nodes[el["id"]] = (el["lat"], el["lon"])
         elif t == "way":
             ways.append(el)
+            ways_by_id[el["id"]] = el
         elif t == "relation":
             relations.append(el)
+
+    # Inherit relation tags down to member ways. A `multipolygon` relation
+    # tagged `landuse=farmland` has lots of unmapped inner-ring ways that
+    # carry the field's polygon geometry but no tags of their own. The
+    # field-boundary synthesiser only looks at way-level tags, so without
+    # this flattening it misses every relation-based field — exactly the
+    # case in rural Cookstown where most farmland is mapped as relations.
+    _PROPAGATE_TAGS = ("landuse", "natural", "leisure", "waterway", "boundary")
+    for rel in relations:
+        rtags = rel.get("tags") or {}
+        if rtags.get("type") not in ("multipolygon", "boundary", None):
+            continue
+        propagated = {k: v for k, v in rtags.items() if k in _PROPAGATE_TAGS}
+        if not propagated:
+            continue
+        for member in rel.get("members") or []:
+            if member.get("type") != "way":
+                continue
+            wid = member.get("ref")
+            w = ways_by_id.get(wid)
+            if w is None:
+                continue
+            wtags = w.setdefault("tags", {})
+            # Only inject if the way doesn't already declare its own
+            # version of that key — never overwrite explicit ways.
+            for k, v in propagated.items():
+                wtags.setdefault(k, v)
+
     return OSMData(nodes=nodes, ways=ways, relations=relations, raw_path=cache_file)
 
 

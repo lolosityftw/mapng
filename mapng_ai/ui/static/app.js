@@ -43,42 +43,157 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
 }).addTo(map);
 
-// Drawing
+// Drawing — polygon (click to add points, double-click / first-point to
+// finish) AND rectangle (still useful for quick squares). Polygon is the
+// default tool now since "any shape" was the requested workflow.
 const drawnItems = new L.FeatureGroup().addTo(map);
 const drawControl = new L.Control.Draw({
-  edit: { featureGroup: drawnItems, edit: false, remove: true },
+  edit: { featureGroup: drawnItems, edit: true, remove: true },
   draw: {
-    polygon: false, polyline: false, marker: false,
-    circle: false, circlemarker: false,
-    rectangle: { shapeOptions: { color: "#d29922", weight: 2 } },
+    polyline: false, marker: false, circle: false, circlemarker: false,
+    polygon: {
+      allowIntersection: false,
+      showArea: true,
+      shapeOptions: { color: "#d29922", weight: 2, fillOpacity: 0.18 },
+    },
+    rectangle: { shapeOptions: { color: "#d29922", weight: 2, fillOpacity: 0.18 } },
   },
 });
 map.addControl(drawControl);
 
-let currentBBox = null;
+// `currentArea` holds the user's drawn area: bbox + (optional) polygon
+// vertices in [lon, lat] order. The polygon is sent to the backend so
+// features can be clipped to the actual selected shape.
+let currentArea = null;
 const bboxReadout = document.getElementById("bbox-readout");
 const generateBtn = document.getElementById("generate");
 const statusEl = document.getElementById("status");
 const stagesEl = document.getElementById("stages");
 
-function setBBox(rect) {
-  drawnItems.clearLayers();
-  drawnItems.addLayer(rect);
-  const b = rect.getBounds();
-  currentBBox = {
-    west:  b.getWest(),
-    south: b.getSouth(),
-    east:  b.getEast(),
-    north: b.getNorth(),
+function _layerToArea(layer) {
+  // Returns { bbox, polygon } where polygon is null for rectangles
+  // (we'll let the backend treat null as "use the bbox itself").
+  let polygon = null;
+  if (typeof layer.getLatLngs === "function" && !(layer instanceof L.Rectangle)) {
+    // Polygon: getLatLngs() → [[ {lat,lng}, ... ]] for simple polygons
+    const rings = layer.getLatLngs();
+    const ring = Array.isArray(rings[0]) ? rings[0] : rings;
+    polygon = ring.map((p) => [p.lng, p.lat]);
+    // Ensure at least 3 distinct points
+    if (polygon.length < 3) return null;
+  }
+  const b = layer.getBounds();
+  return {
+    bbox: {
+      west:  b.getWest(), south: b.getSouth(),
+      east:  b.getEast(), north: b.getNorth(),
+    },
+    polygon,
   };
-  const widthKm  = haversineKm(b.getSouth(), b.getWest(), b.getSouth(), b.getEast());
-  const heightKm = haversineKm(b.getSouth(), b.getWest(), b.getNorth(), b.getWest());
-  bboxReadout.textContent =
-    `${widthKm.toFixed(2)} × ${heightKm.toFixed(2)} km · ` +
-    `W ${currentBBox.west.toFixed(5)}, S ${currentBBox.south.toFixed(5)}, ` +
-    `E ${currentBBox.east.toFixed(5)}, N ${currentBBox.north.toFixed(5)}`;
-  generateBtn.disabled = false;
 }
+
+// ---- Persistent area selection -----------------------------------------
+// Saves the user's drawn polygon/rectangle to localStorage so it
+// re-appears on the map after a server restart or browser reload.
+const AREA_STORAGE_KEY = "mapng_last_area";
+function _saveArea(area) {
+  try { localStorage.setItem(AREA_STORAGE_KEY, JSON.stringify(area)); }
+  catch { /* localStorage may be full or disabled */ }
+}
+function _loadSavedArea() {
+  try {
+    const s = localStorage.getItem(AREA_STORAGE_KEY);
+    return s ? JSON.parse(s) : null;
+  } catch { return null; }
+}
+
+function setArea(layer) {
+  drawnItems.clearLayers();
+  drawnItems.addLayer(layer);
+  const area = _layerToArea(layer);
+  if (!area) {
+    currentArea = null;
+    generateBtn.disabled = true;
+    bboxReadout.textContent = "draw a polygon (click points, double-click to finish) or a rectangle";
+    return;
+  }
+  currentArea = area;
+  _saveArea(area);
+  const b = area.bbox;
+  const widthKm  = haversineKm(b.south, b.west, b.south, b.east);
+  const heightKm = haversineKm(b.south, b.west, b.north, b.west);
+  // BeamNG terrain is square, so the level side is whichever's larger,
+  // clamped 0.5–8 km. Show the user what they'll actually get.
+  const sizeChoice = document.getElementById("size-choice")?.value || "auto";
+  let effectiveKm;
+  if (sizeChoice === "auto") {
+    effectiveKm = Math.min(8.0, Math.max(0.5, Math.max(widthKm, heightKm)));
+  } else {
+    effectiveKm = parseFloat(sizeChoice) / 1000;
+  }
+  const shapeWord = area.polygon ? `polygon (${area.polygon.length} pts)` : "rectangle";
+  bboxReadout.textContent =
+    `${shapeWord} ${widthKm.toFixed(2)} × ${heightKm.toFixed(2)} km bbox → ` +
+    `level ${effectiveKm.toFixed(2)} km square · ` +
+    `W ${b.west.toFixed(5)}, S ${b.south.toFixed(5)}, ` +
+    `E ${b.east.toFixed(5)}, N ${b.north.toFixed(5)}`;
+  generateBtn.disabled = false;
+  // Async lookup of OSM feature counts so the user knows roughly what's
+  // in the bbox before they hit Generate. Debounced so dragging a
+  // rectangle doesn't spam Overpass.
+  _scheduleAreaPreview(area);
+}
+
+// ---- Live OSM-feature preview for the drawn area ------------------------
+let _previewTimer = null;
+const _previewReadout = (() => {
+  // Inject a small readout next to the bbox readout if it doesn't exist.
+  let el = document.getElementById("area-preview-readout");
+  if (el) return el;
+  el = document.createElement("div");
+  el.id = "area-preview-readout";
+  el.className = "area-preview-readout";
+  el.style.cssText = "font-size: 12px; color: #7d8590; padding: 4px 0;";
+  el.textContent = "";
+  bboxReadout?.parentNode?.insertBefore(el, bboxReadout.nextSibling);
+  return el;
+})();
+function _scheduleAreaPreview(area) {
+  if (_previewTimer) clearTimeout(_previewTimer);
+  _previewReadout.textContent = "(counting OSM features…)";
+  _previewTimer = setTimeout(async () => {
+    try {
+      const res = await fetch("/api/preview-area", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(area.bbox),
+      });
+      if (!res.ok) {
+        _previewReadout.textContent = "(preview unavailable)";
+        return;
+      }
+      const c = await res.json();
+      const parts = [];
+      if (c.n_buildings) parts.push(`${c.n_buildings} buildings`);
+      if (c.n_roads)     parts.push(`${c.n_roads} roads`);
+      if (c.n_landuse)   parts.push(`${c.n_landuse} landuse polys`);
+      if (c.n_water)     parts.push(`${c.n_water} water`);
+      if (c.n_barriers)  parts.push(`${c.n_barriers} barriers`);
+      _previewReadout.textContent = parts.length
+        ? "OSM in bbox: " + parts.join(" · ")
+        : "OSM in bbox: empty (likely an unmapped area)";
+    } catch {
+      _previewReadout.textContent = "(preview unavailable)";
+    }
+  }, 600);
+}
+// Backwards-compat alias used by applyPreset() below.
+const setBBox = setArea;
+// Re-render readout when size choice changes
+document.getElementById("size-choice")?.addEventListener("change", () => {
+  const layers = drawnItems.getLayers();
+  if (layers.length) setArea(layers[0]);
+});
 
 // Bbox presets — picks a 2 km area centred on each location and draws it
 const PRESETS = {
@@ -106,6 +221,44 @@ document.getElementById("preset")?.addEventListener("change", (ev) => {
   if (ev.target.value) applyPreset(ev.target.value);
 });
 
+// ---- Persisted size + zoom choices --------------------------------------
+const _CHOICE_KEYS = { size: "mapng_size_choice", zoom: "mapng_zoom_choice" };
+for (const [field, key] of Object.entries(_CHOICE_KEYS)) {
+  const sel = document.getElementById(`${field}-choice`);
+  if (!sel) continue;
+  try {
+    const saved = localStorage.getItem(key);
+    if (saved !== null && [...sel.options].some((o) => o.value === saved)) {
+      sel.value = saved;
+    }
+  } catch { /* ignored */ }
+  sel.addEventListener("change", () => {
+    try { localStorage.setItem(key, sel.value); } catch { /* ignored */ }
+  });
+}
+
+// ---- Restore previously-drawn area on page load -------------------------
+// Runs after the map + draw controls are wired. Re-creates the layer and
+// flies to it so the user keeps their selection across sessions.
+(function _restoreSavedArea() {
+  const saved = _loadSavedArea();
+  if (!saved || !saved.bbox) return;
+  let layer;
+  if (saved.polygon && Array.isArray(saved.polygon) && saved.polygon.length >= 3) {
+    // Polygon — saved as [[lon, lat], ...]; Leaflet wants [[lat, lon], ...]
+    const latLngs = saved.polygon.map(([lon, lat]) => [lat, lon]);
+    layer = L.polygon(latLngs, { color: "#d29922", weight: 2, fillOpacity: 0.18 });
+  } else {
+    const b = saved.bbox;
+    layer = L.rectangle(
+      [[b.south, b.west], [b.north, b.east]],
+      { color: "#d29922", weight: 2, fillOpacity: 0.18 },
+    );
+  }
+  setArea(layer);
+  try { map.flyToBounds(layer.getBounds(), { duration: 0.5 }); } catch { /* ignored */ }
+})();
+
 // ---- Grass tint sliders -----------------------------------------------------
 const grassHueIn = document.getElementById("grass-hue");
 const grassSatIn = document.getElementById("grass-sat");
@@ -115,7 +268,10 @@ const grassSatV = document.getElementById("grass-sat-v");
 const grassBriV = document.getElementById("grass-bri-v");
 const grassReset = document.getElementById("grass-reset");
 
-const GRASS_DEFAULTS = { hue: 0, sat: 1.30, bri: 1.10 };
+// Defaults locked to user-tuned values: hue=60 (mildly blue-leaning
+// green for an overcast NI sky), sat=1.15, bri=0.65. Saved settings in
+// localStorage still win — hit Reset to fall back to these.
+const GRASS_DEFAULTS = { hue: 60, sat: 1.15, bri: 0.65 };
 function _loadGrass() {
   try {
     const s = JSON.parse(localStorage.getItem("mapng_grass") || "{}");
@@ -125,12 +281,11 @@ function _loadGrass() {
 function _saveGrass(g) {
   try { localStorage.setItem("mapng_grass", JSON.stringify(g)); } catch {}
 }
-// Hue rotation maps to an RGB tint multiplier centred on green. Hue=0 means
-// neutral green tint (matches the shader default 0.65/1.20/0.55).
+// Hue rotation maps to an RGB tint multiplier centred on green. Hue=0
+// matches the vivid-Irish-green base in terrain_shader.js. Negative hue
+// pushes yellow-green, positive hue pushes blue-green.
 function _hueToTint(hueDeg) {
-  // Reference green tint at hue=0
-  const base = [0.65, 1.20, 0.55];
-  // Shift slightly: positive hue → bluer, negative → yellower
+  const base = [0.78, 1.22, 0.62];
   const r = base[0] + hueDeg * -0.004;
   const g = base[1] + hueDeg * 0.002;
   const b = base[2] + hueDeg * 0.005;
@@ -169,6 +324,63 @@ grassReset?.addEventListener("click", () => {
   _saveGrass(GRASS_DEFAULTS);
   _readSliders();
 });
+
+// ---- Atmosphere panel: wet roads + cloud shadow + HDRI download ----------
+const wetIn  = document.getElementById("atmos-wetness");
+const wetV   = document.getElementById("atmos-wetness-v");
+const cloudIn = document.getElementById("atmos-cloud");
+const cloudV  = document.getElementById("atmos-cloud-v");
+const hdriBtn = document.getElementById("hdri-download");
+const hdriStatus = document.getElementById("hdri-status");
+
+function _applyAtmos({ wetness, cloud }) {
+  const m = window._terrainMaterial;
+  if (!m) return;
+  if (typeof wetness === "number" && m.uniforms.wetness)
+    m.uniforms.wetness.value = wetness;
+  if (typeof cloud === "number" && m.uniforms.cloudShadowStrength)
+    m.uniforms.cloudShadowStrength.value = cloud;
+  if (wetV)   wetV.textContent   = (wetness ?? 0).toFixed(2);
+  if (cloudV) cloudV.textContent = (cloud ?? 0).toFixed(2);
+}
+wetIn?.addEventListener("input", () => _applyAtmos({
+  wetness: parseFloat(wetIn.value), cloud: parseFloat(cloudIn?.value ?? "0.32"),
+}));
+cloudIn?.addEventListener("input", () => _applyAtmos({
+  wetness: parseFloat(wetIn?.value ?? "0"), cloud: parseFloat(cloudIn.value),
+}));
+window._mapngApplyAtmos = () => _applyAtmos({
+  wetness: parseFloat(wetIn?.value ?? "0"),
+  cloud:   parseFloat(cloudIn?.value ?? "0.32"),
+});
+
+async function _refreshHdriStatus() {
+  if (!hdriStatus) return;
+  try {
+    const r = await fetch("/api/sky/status");
+    const s = await r.json();
+    const have = Object.keys(s.cached || {}).length > 0;
+    hdriStatus.textContent = have ? `cached (${Math.round((Object.values(s.cached)[0] || 0) / 1024)} KB)` : "not downloaded";
+    hdriStatus.classList.toggle("on", have);
+    if (hdriBtn) hdriBtn.disabled = false;
+  } catch (e) {
+    hdriStatus.textContent = "(status unavailable)";
+  }
+}
+hdriBtn?.addEventListener("click", async () => {
+  if (!hdriStatus) return;
+  hdriBtn.disabled = true;
+  hdriStatus.textContent = "downloading…";
+  try {
+    const r = await fetch("/api/sky/download", { method: "POST" });
+    if (!r.ok) throw new Error(await r.text());
+    hdriStatus.textContent = "downloaded — reload the page to apply";
+  } catch (e) {
+    hdriStatus.textContent = "download failed: " + (e.message || e);
+    hdriBtn.disabled = false;
+  }
+});
+_refreshHdriStatus();
 // Reload sliders + reapply whenever a new pipeline run replaces the terrain
 // (the material changes per setHeightmap, so the tint must be reapplied).
 const _origSetHeightmap = () => null;     // placeholder — wire below
@@ -191,10 +403,15 @@ window.addEventListener("keydown", (ev) => {
   }
 });
 
-map.on(L.Draw.Event.CREATED, (e) => setBBox(e.layer));
+map.on(L.Draw.Event.CREATED, (e) => setArea(e.layer));
+map.on("draw:edited", (e) => {
+  // After in-place edit (vertex drag), re-derive the bbox/polygon
+  e.layers.eachLayer((layer) => setArea(layer));
+});
 map.on("draw:deleted", () => {
-  currentBBox = null;
-  bboxReadout.textContent = "draw a rectangle on the map";
+  currentArea = null;
+  try { localStorage.removeItem(AREA_STORAGE_KEY); } catch { /* ignored */ }
+  bboxReadout.textContent = "draw a polygon (click points, double-click to finish) or a rectangle";
   generateBtn.disabled = true;
 });
 
@@ -276,7 +493,7 @@ function formatBytes(n) {
 
 // ---- Generate flow ----
 generateBtn.addEventListener("click", async () => {
-  if (!currentBBox) return;
+  if (!currentArea) return;
   generateBtn.disabled = true;
   statusEl.className = "status running";
   statusEl.textContent = "starting…";
@@ -288,10 +505,21 @@ generateBtn.addEventListener("click", async () => {
   await refreshActiveQuality();
   window.MapNGPreview?.invalidateGlbCache?.();
 
+  // Body carries the bbox + optional polygon vertices + size/zoom
+  // overrides. `polygon: null` means "use the bbox"; otherwise the
+  // backend clips placements to the polygon.
+  const sizeChoice = document.getElementById("size-choice")?.value || "auto";
+  const zoomChoice = document.getElementById("zoom-choice")?.value || "auto";
+  const body = {
+    ...currentArea.bbox,
+    polygon: currentArea.polygon,
+    size_m: sizeChoice === "auto" ? null : parseFloat(sizeChoice),
+    imagery_zoom: zoomChoice === "auto" ? null : parseInt(zoomChoice, 10),
+  };
   const res = await fetch("/api/generate", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(currentBBox),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const err = await res.text();

@@ -51,6 +51,17 @@ const FRAG = `
   uniform float grassBrightness;     // 1.0 = identity
   uniform vec4 grassLayerMask;       // 1.0 per slot if that layer is grass-like
 
+  // Cloud shadow uniforms (drifting FBM-modulated darkening)
+  uniform float cloudShadowStrength; // 0..1, 0 = no clouds, 0.35 = typical NI
+  uniform float cloudSpeed;          // metres/second of cloud drift
+  uniform vec2  cloudDir;            // unit vector, wind direction
+  uniform float cloudFreq;           // 1/m spatial frequency
+
+  // Wetness uniform — 0 = dry, 1 = freshly rained. Darkens roads + adds
+  // a sun-direction specular highlight on asphalt-flagged pixels only.
+  uniform float wetness;
+  uniform vec4 asphaltLayerMask;     // 1.0 per slot if that layer is asphalt
+
   // Cheap hash → noise for macro variation
   float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
   float vnoise(vec2 p) {
@@ -96,13 +107,25 @@ const FRAG = `
     return (dA * w1 + dB * w2 + dC * w3) / wsum;
   }
 
+  // Distance-aware tile scaling. Near the camera the standard tile (~4 m)
+  // gives crisp ground detail. Beyond ~250 m we fade in a coarser tile
+  // (32×) so the repeat pattern stops aliasing into a fizzling moiré at
+  // distance. Returns a smoothly-blended worldUV for both scales.
+  vec2 distanceScaledUV(float dist) {
+    float farFactor = smoothstep(250.0, 700.0, dist);
+    float scale = mix(1.0, 8.0, farFactor);
+    return vWorldPos.xz / (tileSize * scale);
+  }
+
   void main() {
-    vec2 worldUV = vWorldPos.xz / tileSize;
+    float camDist = length(vWorldPos - cameraPosition);
+    vec2 worldUV = distanceScaledUV(camDist);
 
     vec3 albedo = vec3(0.0);
     vec3 nLocal = vec3(0.0, 0.0, 0.0);
     float total = 0.0;
     float waterAmount = 0.0;
+    float asphaltAmount = 0.0;
 
     // Loop unrolled for WebGL1 compatibility
     for (int i = 0; i < 4; i++) {
@@ -123,6 +146,13 @@ const FRAG = `
         float grey = dot(d, vec3(0.299, 0.587, 0.114));
         d = mix(vec3(grey), d, grassSaturation);
       }
+      // Track asphalt-flagged layer coverage for the wet-road effect.
+      float am = 0.0;
+      if (i == 0) am = asphaltLayerMask.x;
+      else if (i == 1) am = asphaltLayerMask.y;
+      else if (i == 2) am = asphaltLayerMask.z;
+      else am = asphaltLayerMask.w;
+      if (am > 0.5) asphaltAmount += a;
       albedo += d * a;
       nLocal += n * a;
       total += a;
@@ -146,8 +176,37 @@ const FRAG = `
       albedo = mix(albedo, waterTint, waterAmount);
     }
 
-    float macro = vnoise(vWorldPos.xz * macroBlendFreq);
-    albedo *= mix(0.85, 1.10, macro);
+    // Two-octave macro variation: a slow large-scale shade + a sharper
+    // medium-scale tint, multiplied so adjacent "fields" read as visibly
+    // different greens — the patchwork-quilt look you see flying over NI.
+    float macroSlow = vnoise(vWorldPos.xz * macroBlendFreq);
+    float macroMid  = vnoise(vWorldPos.xz * macroBlendFreq * 4.7 + 13.1);
+    float macroFast = vnoise(vWorldPos.xz * macroBlendFreq * 13.0 + 27.3);
+    // Tighter amplitudes so the cumulative grass-tint gain stays unclipped.
+    float macroL = mix(0.86, 1.08, macroSlow) * mix(0.95, 1.03, macroMid);
+    albedo *= macroL;
+    // Per-cell green hue offset — only on grass-flagged pixels — to push
+    // fields toward subtly different yellow-green / blue-green tones.
+    // Amplitude trimmed so sunny fields don't blow out neon.
+    float anyGrass = max(max(grassLayerMask.x, grassLayerMask.y),
+                         max(grassLayerMask.z, grassLayerMask.w));
+    if (anyGrass > 0.5) {
+      vec3 hueShift = vec3(
+        mix(0.95, 1.03, macroFast),
+        mix(0.97, 1.05, macroMid),
+        mix(0.90, 1.00, macroSlow)
+      );
+      albedo *= hueShift;
+    }
+    // Soft highlight knee — Reinhard-style compression on the brightest
+    // pixels only. Pixels under ~0.7 luminance pass through unchanged;
+    // anything brighter is gently compressed back below 1.0 so we never
+    // get blown-white "neon" highlights regardless of slider settings.
+    float lum = dot(albedo, vec3(0.299, 0.587, 0.114));
+    if (lum > 0.7) {
+      float k = (lum - 0.7) / max(lum, 1e-3);
+      albedo = mix(albedo, albedo / (1.0 + (lum - 0.7) * 1.6), k);
+    }
 
     // Compute the actual surface normal from screen-space position derivatives.
     // Independent of the geometry attribute → fixes any winding issues and
@@ -163,8 +222,24 @@ const FRAG = `
     float lambert = max(dot(N, L), 0.0);
     float wrap = clamp(dot(N, L) * 0.5 + 0.5, 0.0, 1.0);
 
+    // Cloud shadow modulation. Two-octave FBM at world XZ, drifting in the
+    // wind direction at cloudSpeed. Subtracts up to cloudShadowStrength
+    // from the sun term so direct light dims under clouds — ambient still
+    // illuminates the shaded areas, just like in real overcast NI.
+    vec2 cloudUV = vWorldPos.xz * cloudFreq + cloudDir * (time * cloudSpeed * cloudFreq);
+    float c1 = vnoise(cloudUV);
+    float c2 = vnoise(cloudUV * 2.3 + 11.7);
+    float cloudMask = smoothstep(0.40, 0.85, c1 * 0.65 + c2 * 0.35);
+    float sunMul = 1.0 - cloudShadowStrength * cloudMask;
+
+    // Wet asphalt: darken the diffuse to ~0.55 at full wetness, mostly on
+    // pixels where the asphalt opacity dominates. Real wet tarmac reads
+    // ~40% darker than dry tarmac to the camera.
+    float wetAsphalt = clamp(asphaltAmount, 0.0, 1.0) * wetness;
+    albedo *= mix(1.0, 0.58, wetAsphalt);
+
     vec3 ambient = albedo * ambientColor * (0.6 + 0.4 * wrap);
-    vec3 lit = albedo * sunColor * lambert;
+    vec3 lit = albedo * sunColor * lambert * sunMul;
 
     // Specular highlight for water (Blinn–Phong-ish)
     if (waterAmount > 0.3) {
@@ -172,6 +247,15 @@ const FRAG = `
       vec3 H = normalize(L + V);
       float spec = pow(max(dot(N, H), 0.0), 64.0) * waterAmount;
       lit += spec * sunColor * 1.4;
+    }
+    // Wet-road specular — sharper exponent + dimmer than water so it reads
+    // as a sheen, not a mirror. Multiplied by sunMul so cloudy ground
+    // doesn't unrealistically glint.
+    if (wetAsphalt > 0.05) {
+      vec3 V2 = normalize(cameraPosition - vWorldPos);
+      vec3 H2 = normalize(L + V2);
+      float wetSpec = pow(max(dot(N, H2), 0.0), 96.0) * wetAsphalt;
+      lit += wetSpec * sunColor * 0.7 * sunMul;
     }
 
     vec3 colour = ambient + lit;
@@ -217,16 +301,31 @@ export function createTerrainMaterial({ tileSize = 4.0, fogColor = 0xc7d6e0, fog
       sunDir:        { value: new THREE.Vector3(0.5, 0.7, 0.4).normalize() },
       sunColor:      { value: new THREE.Color(0xfff1d6) },
       ambientColor:  { value: new THREE.Color(0xb6cdde) },
-      macroBlendFreq:{ value: 0.012 },
+      // 1/80 ≈ one slow-noise wavelength per ~80 m, which matches the
+      // typical NI field size. Two faster octaves (4.7×, 13×) layer on top
+      // inside the shader to break up monotone patches.
+      macroBlendFreq:{ value: 0.0125 },
       fogColor:      { value: new THREE.Color(fogColor) },
       fogNear:       { value: fogNear },
       fogFar:        { value: fogFar },
       terrainHalf:   { value: terrainHalf },
-      // Adjustable grass tint (settable from main page UI)
-      grassTint:       { value: new THREE.Color(0.65, 1.20, 0.55) },  // strong green push
-      grassSaturation: { value: 1.30 },
-      grassBrightness: { value: 1.10 },
+      // Adjustable grass tint (settable from main page UI). Defaults
+      // match the user-tuned slider values: hue=60° (mildly blue-green
+      // shift), saturation 1.15, brightness 0.65 — duller and bluer than
+      // a sunny day, which is bang-on for a typical Cookstown sky.
+      grassTint:       { value: new THREE.Color(0.54, 1.34, 0.92) },
+      grassSaturation: { value: 1.15 },
+      grassBrightness: { value: 0.65 },
       grassLayerMask:  { value: new THREE.Vector4(0, 0, 0, 0) },
+      // Cloud shadow controls — defaults match an overcast-but-not-grim
+      // NI day. cloudShadowStrength=0 disables, =1 makes shadows opaque.
+      cloudShadowStrength: { value: 0.32 },
+      cloudSpeed:          { value: 6.5 },          // m/s, ≈ 23 km/h
+      cloudDir:            { value: new THREE.Vector2(0.65, 0.76).normalize() },
+      cloudFreq:           { value: 1.0 / 220.0 },  // ~220 m cloud cells
+      // Wet-road controls (toggle from the main page UI).
+      wetness:            { value: 0.0 },
+      asphaltLayerMask:   { value: new THREE.Vector4(0, 0, 0, 0) },
     },
   });
   mat.userData.tickTime = (dt) => {
@@ -249,15 +348,20 @@ export async function applyTerrainLayers(material, layers, { sunDir } = {}) {
   const waterIdx = usable.findIndex((l) => l.key === "water");
   material.uniforms.waterLayerIndex.value = waterIdx;
   // Flag the grass-like classes so the tint uniforms only affect them.
-  const GRASS_KEYS = new Set(["pasture", "lawn"]);
+  // Forest is included so its dark "forest_floor" tile reads as a richer
+  // green canopy under the same tint slider — important because the bare
+  // forest_floor PBR slug from Poly Haven is browny-grey by default.
+  const GRASS_KEYS = new Set(["pasture", "lawn", "forest"]);
+  const ASPHALT_KEYS = new Set(["asphalt"]);
   const mask = new THREE.Vector4(0, 0, 0, 0);
+  const aspMask = new THREE.Vector4(0, 0, 0, 0);
   for (let i = 0; i < usable.length && i < 4; i++) {
-    if (GRASS_KEYS.has(usable[i].key)) {
-      const k = ["x", "y", "z", "w"][i];
-      mask[k] = 1.0;
-    }
+    const k = ["x", "y", "z", "w"][i];
+    if (GRASS_KEYS.has(usable[i].key)) mask[k] = 1.0;
+    if (ASPHALT_KEYS.has(usable[i].key)) aspMask[k] = 1.0;
   }
   material.uniforms.grassLayerMask.value = mask;
+  material.uniforms.asphaltLayerMask.value = aspMask;
   const loader = new THREE.TextureLoader();
   loader.crossOrigin = "anonymous";
 

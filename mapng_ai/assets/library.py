@@ -263,13 +263,31 @@ def building_library_fs_path(rel_path: str) -> Path | None:
     return fs if fs.exists() else None
 
 
-def pick_tree(seed: int) -> _LeafEntry | None:
-    """Return a deterministic tree from the library, None if empty."""
+def pick_tree(seed: int, prefer: tuple[str, ...] = ()) -> _LeafEntry | None:
+    """Return a deterministic tree from the library.
+
+    `prefer` is an ordered list of species names to favour — e.g.
+    `("hawthorn", "oak")` for hedge trees. The first species with any
+    cached GLBs supplies the pick. If none of the preferences match,
+    falls back to a flat random across all species.
+    """
     idx = tree_library()
-    flat = [e for entries in idx.values() for e in entries]
-    if not flat:
+    if not idx:
         return None
-    return flat[seed % len(flat)]
+    for sp in prefer:
+        sp_lc = sp.lower()
+        cands = idx.get(sp_lc) or idx.get(f"tree_{sp_lc}") or idx.get(sp_lc.replace("_", " "))
+        # Some catalogue entries use the prefix `tree_` in folder names;
+        # check both shapes.
+        if not cands:
+            for k, v in idx.items():
+                if k.endswith(sp_lc):
+                    cands = v
+                    break
+        if cands:
+            return cands[seed % len(cands)]
+    flat = [e for entries in idx.values() for e in entries]
+    return flat[seed % len(flat)] if flat else None
 
 
 def pick_vehicle(kind: str | None, seed: int) -> _LeafEntry | None:

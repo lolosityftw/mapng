@@ -63,28 +63,27 @@
         <option value="original">Original (uncompressed)</option>
       </select>
     </label>
-    <button id="build-missing" class="primary">Build missing</button>
-    <button id="build-all" class="ghost">Generate all <span id="build-all-count"></span></button>
-    <button id="regen-buildings" class="ghost" title="Force-regenerate every building entry — re-rolls geometry + textures at the current Meshy max polycount">Regen buildings</button>
-    <button id="regen-trees" class="ghost" title="Force-regenerate every tree entry">Regen trees</button>
-    <button id="bake-active" class="primary" title="Pre-bake just the currently selected active quality for every built entry">Pre-bake active quality</button>
+    <button id="import-pack" class="primary" title="Import a CC0 GLB pack (zip) — Quaternius, Kenney, etc.">Import asset pack</button>
+    <button id="bake-active" class="ghost" title="Pre-bake just the currently selected active quality for every built entry">Pre-bake active quality</button>
     <button id="bake-all" class="ghost" title="Pre-bake every quality variant for every built entry — slow but lets you switch instantly later">Bake all qualities</button>
     <button id="terrain-pack" class="ghost" title="Download CC0 PBR ground textures from Poly Haven">Terrain PBR pack</button>
   </div>
-  <div class="actions secondary">
-    <label class="active-quality" title="Caps Meshy's target_polycount for every generation. Lower = simpler meshes + cleaner topology + faster bake.">
-      <span>Meshy max polycount</span>
-      <select id="meshy-polycount">
-        <option value="1500">1.5K · ultra low (silhouette only)</option>
-        <option value="2500">2.5K · low (game ready)</option>
-        <option value="5000" selected>5K · medium (default for buildings)</option>
-        <option value="7500">7.5K · medium-high</option>
-        <option value="10000">10K · high (background hero)</option>
-        <option value="15000">15K · very high (foreground hero)</option>
-        <option value="20000">20K · max (close inspection)</option>
-      </select>
-    </label>
+</section>
+<input id="import-pack-input" type="file" accept=".zip" hidden />
+
+<section id="beamng-bar" class="beamng-bar">
+  <div class="bn-head">
+    <strong>BeamNG asset reference mode</strong>
+    <span id="bn-state" class="bn-state">checking…</span>
+    <button id="bn-rescan" class="ghost" title="Rescan the BeamNG install for shapes">Rescan</button>
   </div>
+  <div class="bn-body">
+    <div><label>Install</label><span id="bn-path">—</span></div>
+    <div><label>Total shapes</label><span id="bn-count">—</span></div>
+    <div><label>By category</label><span id="bn-by-cat">—</span></div>
+    <div><label>By level</label><span id="bn-by-lvl">—</span></div>
+  </div>
+  <small class="hint">When detected, the pipeline swaps building + tree shapes for cross-level references against your BeamNG install at export time. The web preview keeps using the local CC0 / block-out assets.</small>
 </section>
 
 <main>
@@ -118,8 +117,6 @@
         <div><label>Status</label><span id="d-status"></span></div>
       </div>
       <div class="d-actions">
-        <button id="d-generate" class="primary">Generate</button>
-        <button id="d-regenerate" class="ghost">Regenerate</button>
         <button id="d-bake" class="ghost">Pre-bake variants</button>
         <button id="d-delete" class="danger">Delete cache</button>
       </div>

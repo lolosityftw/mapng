@@ -7,22 +7,20 @@ inside a working BeamNG.drive install. Drop the ZIP into
 
 and the level appears in the in-game level picker.
 
-Minimum viable level (Phase 2):
-    - terrain (.ter, terrain.json, materials)
-    - LevelInfo + ScatterSky + TimeOfDay + sun
-    - PlayerDropPoints with one SpawnSphere on the highest grid intersection
-    - info.json (so the level shows up in the picker)
-    - mainLevel.lua (BeamNG looks for it on level load)
-    - flat grey terrain.png so the surface isn't an angry purple checkerboard
-
-Later phases plug in: Phase 4 → real materials & terrain.png, Phase 3 → buildings,
-Phase 5 → forest + decals + spawn heuristics.
+Key facts about BeamNG terrain:
+  - World width = size_px * squareSize  (squareSize MUST be set or terrain is wrong scale)
+  - TerrainBlock position is the SW corner in world space
+  - maxHeight is the full height range (max_elev - min_elev), NOT the absolute max
+  - TerrainMaterial has NO blendMap field; layer blending comes from .ter layerMap
+  - Material paths must include the file extension
 """
 from __future__ import annotations
 
 import io
 import json
 import math
+import os
+import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,17 +30,23 @@ import numpy as np
 from PIL import Image
 
 from mapng_ai import config
-from mapng_ai.assets.placeholder import write_hedge_dae, write_pitched_dae, write_tree_dae
+from mapng_ai.assets.placeholder import (
+    write_hedge_dae, write_pitched_dae, write_tree_dae, write_wall_dae,
+    write_fence_dae, write_gate_dae,
+)
 from mapng_ai.pipeline.beamng_ter import write_ter
-from mapng_ai.pipeline.decal_roads import DecalRoad, write_road_decal_texture
+from mapng_ai.pipeline.decal_roads import (
+    DecalRoad, write_road_decal_texture, write_drive_decal_texture,
+)
 from mapng_ai.pipeline.foliage import FoliageResult, HedgeSegment, TreePlacement
 from mapng_ai.pipeline.placement import BuildingPlacement
 from mapng_ai.pipeline.splatting import SplatResult
 
 
 # ---------------------------------------------------------------------------
-# JSON snippets — keep these inlined so they're easy to read against the spec
+# Metadata files
 # ---------------------------------------------------------------------------
+
 def _info_json(level_name: str, side_m: float) -> dict:
     return {
         "title": level_name,
@@ -60,88 +64,184 @@ def _info_json(level_name: str, side_m: float) -> dict:
     }
 
 
-def _terrain_json(level_name: str, size_px: int, materials: list[str]) -> dict:
+def _terrain_json(level_name: str, size_px: int, side_m: float, materials: list[str]) -> dict:
+    """terrain.json descriptor for the .ter binary.
+
+    squareSize (meters per pixel) is critical — without it BeamNG defaults
+    to 1 m/px and the terrain renders at size_px × size_px meters instead
+    of the intended side_m × side_m meters.
+    """
+    square_size = side_m / size_px
     return {
         "version": 9,
         "size": size_px,
-        "datafile":        f"/levels/{level_name}/theTerrain.ter",
-        "heightmapImage":  f"/levels/{level_name}/theTerrain.terrainheightmap.png",
+        "squareSize": square_size,
+        "datafile": f"levels/{level_name}/theTerrain.ter",
+        "heightmapImage": f"levels/{level_name}/theTerrain.terrainheightmap.png",
         "heightMapSize": size_px * size_px,
         "heightMapItemSize": 2,
-        "layerMapSize":  size_px * size_px,
+        "layerMapSize": size_px * size_px,
         "layerMapItemSize": 1,
         "materials": materials,
         "binaryFormat": (
             "version(char), size(unsigned int), heightMap(heightMapSize * heightMapItemSize), "
-            "layerMap(layerMapSize * layerMapItemSize), layerTextureMap(layerMapSize * layerMapItemSize), "
-            "materialNames"
+            "layerMap(layerMapSize * layerMapItemSize), "
+            "layerTextureMap(layerMapSize * layerMapItemSize), materialNames"
         ),
     }
 
 
-def _terrain_materials_json(level_name: str, size_m: float,
-                            splat: SplatResult | None = None) -> dict:
+def _terrain_materials_json(level_name: str, side_m: float,
+                             splat: SplatResult | None = None) -> dict:
+    """TerrainMaterial definitions.
+
+    Rules:
+      - NO blendMap field — layer blending is encoded in the .ter layerMap binary,
+        not as a per-material image reference.  Adding blendMap causes BeamNG to
+        fail loading the asset reference and leaves the surface untextured.
+      - diffuseMap MUST include the file extension.
+      - mapTo must match the dict key so BeamNG resolves the material by name.
+      - diffuseSize is the world-space tile size in meters (4 m = fine detail).
+    """
+    _GROUNDMODELS = {
+        "asphalt":  "ASPHALT",
+        "concrete": "ASPHALT",
+        "lawn":     "GRASS",
+        "pasture":  "GRASS",
+        "earth":    "DIRT",
+        "gravel":   "GRAVEL",
+        "water":    "ASPHALT",
+        "forest":   "GRASS",
+    }
+
     if splat is None:
         return {
             "DefaultMaterial": {
-                "class":        "TerrainMaterial",
+                "mapTo": "DefaultMaterial",
+                "class": "TerrainMaterial",
                 "internalName": "DefaultMaterial",
-                "diffuseMap":   f"levels/{level_name}/art/terrains/terrain.png",
-                "diffuseSize":  int(size_m),
-                "groundmodelName": "GROUNDMODEL_ASPHALT1",
+                "diffuseMap": f"levels/{level_name}/art/terrains/terrain.png",
+                "diffuseSize": int(side_m),
+                "groundmodelName": "ASPHALT",
             },
         }
 
-    _GROUNDMODELS = {
-        "asphalt":  "GROUNDMODEL_ASPHALT1",
-        "concrete": "GROUNDMODEL_CONCRETE",
-        "lawn":     "GROUNDMODEL_GRASS",
-        "pasture":  "GROUNDMODEL_GRASS",
-        "earth":    "GROUNDMODEL_DIRT",
-        "gravel":   "GROUNDMODEL_GRAVEL",
-        "water":    "GROUNDMODEL_ASPHALT1",
-        "forest":   "GROUNDMODEL_GRASS",
-    }
     out: dict = {}
     for layer in splat.layers:
         key = layer.cls.key
-        # Pick the file extension that matches the source on disk so the
-        # in-zip path is consistent with what we bundle.
-        diffuse_ext = layer.diffuse_path.suffix.lower()
-        material = {
-            "class":        "TerrainMaterial",
+        ext = layer.diffuse_path.suffix.lower()
+        mat: dict = {
+            "mapTo": f"mat_{key}",
+            "class": "TerrainMaterial",
             "internalName": f"mat_{key}",
-            "diffuseMap":   f"levels/{level_name}/art/terrains/diffuse_{key}{diffuse_ext}",
-            "diffuseSize":  4,
-            "blendMap":     f"levels/{level_name}/art/terrains/opacity_{key}.png",
-            "groundmodelName": _GROUNDMODELS.get(key, "GROUNDMODEL_GRASS"),
+            "diffuseMap": f"levels/{level_name}/art/terrains/diffuse_{key}{ext}",
+            "diffuseSize": 4,
+            "groundmodelName": _GROUNDMODELS.get(key, "GRASS"),
         }
         if layer.normal_path is not None:
             ne = layer.normal_path.suffix.lower()
-            material["normalMap"] = f"levels/{level_name}/art/terrains/normal_{key}{ne}"
+            mat["normalMap"] = f"levels/{level_name}/art/terrains/normal_{key}{ne}"
         if layer.roughness_path is not None:
             re_ = layer.roughness_path.suffix.lower()
-            material["specularMap"] = f"levels/{level_name}/art/terrains/rough_{key}{re_}"
-            material["specularPower"] = 16
-        out[f"mat_{key}"] = material
+            mat["specularMap"] = f"levels/{level_name}/art/terrains/rough_{key}{re_}"
+            mat["specularPower"] = 16
+        out[f"mat_{key}"] = mat
     return out
 
+
+# ---------------------------------------------------------------------------
+# mainLevel.lua
+# ---------------------------------------------------------------------------
+
+def _main_level_lua(foreign_levels: list[str]) -> str:
+    if foreign_levels:
+        levels_lua = "{\n" + "\n".join(f"  '{name}'," for name in foreign_levels) + "\n}"
+    else:
+        levels_lua = "{}"
+    return (
+        "-- MapNG-AI generated level\n"
+        "local M = {}\n"
+        "\n"
+        f"local foreignLevels = {levels_lua}\n"
+        "\n"
+        "local function loadForeignMaterials()\n"
+        "  for _, name in ipairs(foreignLevels) do\n"
+        "    local files = FS:findFiles('/levels/' .. name .. '/art/',\n"
+        "                               '*.materials.json', -1, true, false)\n"
+        "    for _, filename in ipairs(files) do\n"
+        "      loadJsonMaterialsFile(filename)\n"
+        "    end\n"
+        "  end\n"
+        "end\n"
+        "\n"
+        "local function onClientStartMission(levelPath)\n"
+        "  loadForeignMaterials()\n"
+        "end\n"
+        "\n"
+        "local function onUpdate() end\n"
+        "\n"
+        "M.onClientStartMission = onClientStartMission\n"
+        "M.onUpdate = onUpdate\n"
+        "return M\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Road materials
+# ---------------------------------------------------------------------------
+
+def _road_materials_json(level_name: str) -> dict:
+    def _mat(name: str, tex_path: str) -> dict:
+        return {
+            "mapTo": name,
+            "class": "Material",
+            "translucent": True,
+            "translucentBlendOp": "PreMulAlpha",
+            "alphaRef": 0,
+            "Stages": [
+                {
+                    "baseColorMap": tex_path,
+                    "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
+                },
+                {}, {}, {},
+            ],
+        }
+
+    return {
+        "MapNG_RoadDecal": _mat(
+            "MapNG_RoadDecal",
+            f"levels/{level_name}/art/road/road_decal.png",
+        ),
+        "MapNG_DriveDecal": _mat(
+            "MapNG_DriveDecal",
+            f"levels/{level_name}/art/road/drive_decal.png",
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Scene-graph helpers
+# ---------------------------------------------------------------------------
 
 def _yaw_rotation_matrix(yaw: float) -> list[float]:
     c, s = math.cos(yaw), math.sin(yaw)
     return [c, -s, 0, s, c, 0, 0, 0, 1]
 
 
+def _shape_name(level_name: str, shape_relpath: str) -> str:
+    if shape_relpath.startswith("levels/"):
+        return f"/{shape_relpath}"
+    return f"/levels/{level_name}/{shape_relpath}"
+
+
 def _building_tsstatics(level_name: str, buildings: Sequence[BuildingPlacement]) -> list[dict]:
-    out: list[dict] = []
+    out = []
     for b in buildings:
         sx, sy, sz = b.scale_xyz
         out.append({
             "class": "TSStatic",
             "name": f"bld_{b.osm_id}",
-            "shapeName": f"/levels/{level_name}/{b.asset.shape_relpath}",
-            # Pitched DAE is unit-1 with base at z=0 and ridge at z=1, so the
-            # placement Z is the terrain height (no half-height lift now).
+            "shapeName": _shape_name(level_name, b.asset.shape_relpath),
             "position": [b.x_m, b.y_m, b.z_m],
             "rotationMatrix": _yaw_rotation_matrix(b.yaw_rad),
             "scale": [sx, sy, sz],
@@ -150,13 +250,13 @@ def _building_tsstatics(level_name: str, buildings: Sequence[BuildingPlacement])
 
 
 def _tree_tsstatics(level_name: str, trees: Sequence[TreePlacement]) -> list[dict]:
-    out: list[dict] = []
+    out = []
     for i, t in enumerate(trees):
         sx, sy, sz = t.scale_xyz
         out.append({
             "class": "TSStatic",
             "name": f"tree_{i}",
-            "shapeName": f"/levels/{level_name}/{t.shape_relpath}",
+            "shapeName": _shape_name(level_name, t.shape_relpath),
             "position": [t.x, t.y, t.z],
             "rotationMatrix": _yaw_rotation_matrix(t.yaw),
             "scale": [sx, sy, sz],
@@ -165,91 +265,160 @@ def _tree_tsstatics(level_name: str, trees: Sequence[TreePlacement]) -> list[dic
 
 
 def _hedge_tsstatics(level_name: str, hedges: Sequence[HedgeSegment]) -> list[dict]:
-    out: list[dict] = []
+    import random as _r
+    out = []
+    hedge_shape = f"/levels/{level_name}/art/shapes/foliage/hedge.dae"
+    wall_shape  = f"/levels/{level_name}/art/shapes/foliage/wall.dae"
+    fence_shape = f"/levels/{level_name}/art/shapes/foliage/fence.dae"
+    gate_shape  = f"/levels/{level_name}/art/shapes/foliage/gate.dae"
     for i, h in enumerate(hedges):
-        out.append({
-            "class": "TSStatic",
-            "name": f"hedge_{i}",
-            "shapeName": f"/levels/{level_name}/art/shapes/foliage/hedge.dae",
-            "position": [h.x, h.y, h.z],
-            "rotationMatrix": _yaw_rotation_matrix(h.yaw),
-            "scale": [h.length_m, h.width_m, h.height_m],
-        })
+        seed = (i * 2654435761) ^ hash((round(h.x, 1), round(h.y, 1)))
+        rng = _r.Random(seed & 0xFFFFFFFF)
+        mat = getattr(h, "material", "hedge") or "hedge"
+
+        if mat in ("wall", "fence", "gate"):
+            shape = {"wall": wall_shape, "fence": fence_shape, "gate": gate_shape}[mat]
+            out.append({
+                "class": "TSStatic",
+                "name": f"{mat}_{i}",
+                "shapeName": shape,
+                "position": [h.x, h.y, h.z],
+                "rotationMatrix": _yaw_rotation_matrix(h.yaw + rng.uniform(-0.04, 0.04)),
+                "scale": [
+                    h.length_m * rng.uniform(0.97, 1.03),
+                    h.width_m  * rng.uniform(0.95, 1.10),
+                    h.height_m * rng.uniform(0.92, 1.08),
+                ],
+            })
+            continue
+
+        n = max(3, min(6, int(round(h.length_m / 0.9))))
+        cos_y, sin_y = math.cos(h.yaw), math.sin(h.yaw)
+        for k in range(n):
+            t = (k + 0.5) / n + rng.uniform(-0.06, 0.06)
+            t = max(0.02, min(0.98, t))
+            along = (t - 0.5) * h.length_m
+            lateral = rng.uniform(-h.width_m * 0.35, h.width_m * 0.35)
+            bx = h.x + cos_y * along - sin_y * lateral
+            by = h.y + sin_y * along + cos_y * lateral
+            out.append({
+                "class": "TSStatic",
+                "name": f"hedge_{i}_{k}",
+                "shapeName": hedge_shape,
+                "position": [bx, by, h.z],
+                "rotationMatrix": _yaw_rotation_matrix(h.yaw + rng.uniform(-math.pi, math.pi)),
+                "scale": [
+                    h.width_m  * rng.uniform(1.0, 1.6),
+                    h.width_m  * rng.uniform(1.0, 1.6),
+                    h.height_m * rng.uniform(0.85, 1.15),
+                ],
+            })
     return out
 
 
 def _decal_roads_objects(roads: Sequence[DecalRoad]) -> list[dict]:
-    out: list[dict] = []
+    out = []
     for road in roads:
+        is_drive = getattr(road, "material", "asphalt") == "dirt"
+        material = "MapNG_DriveDecal" if is_drive else "MapNG_RoadDecal"
+        prefix = "drive" if is_drive else "road"
+        first = road.nodes_xyz[0]
         out.append({
             "class": "DecalRoad",
-            "name": f"road_{road.osm_id}",
-            "material": "MapNG_RoadDecal",
+            "name": f"{prefix}_{road.osm_id}",
+            "material": material,
+            "position": [first[0], first[1], first[2]],
+            "nodes": [[x, y, z, road.width_m] for (x, y, z) in road.nodes_xyz],
+            "drivability": 0.6 if is_drive else 1.0,
+            "renderPriority": 8 if is_drive else 10,
+            "breakAngle": 3,
+            "distanceFade": [200, 50],
+            "startEndFade": [5, 5],
+            "textureLength": 5.0 if is_drive else 12.0,
             "improvedSpline": True,
             "smoothness": 0.5,
-            "renderPriority": 10,
-            "textureLength": 12.0,
-            "nodes": [[x, y, z, road.width_m] for (x, y, z) in road.nodes_xyz],
+            "useSubdivisions": True,
         })
     return out
 
 
-def _level_objects(level_name: str, size_m: float, terrain_min_m: float, terrain_max_m: float,
-                   spawn_x: float, spawn_y: float, spawn_z: float) -> list[dict]:
+def _level_objects(level_name: str, size_m: float, size_px: int,
+                   terrain_min_m: float, terrain_max_m: float,
+                   water_z: float | None = None) -> list[dict]:
     half = size_m / 2
+    square_size = size_m / size_px
+    # maxHeight = full height range so BeamNG maps uint16 → world-space metres correctly.
+    # Using absolute max_m would exaggerate terrain by ~10–20× for NI topography.
+    max_height = max(1.0, float(terrain_max_m - terrain_min_m))
+    terrain_block = {
+        "class": "TerrainBlock",
+        "name": "theTerrain",
+        # path WITHOUT leading slash — matches community mod convention
+        "terrainFile": f"levels/{level_name}/theTerrain.ter",
+        # SW corner: terrain extends from here by size_px * squareSize in X and Y
+        "position": [-half, -half, terrain_min_m],
+        # squareSize = metres per heightmap pixel — critical for correct world scale
+        "squareSize": square_size,
+        "maxHeight": max_height,
+        "castShadows": True,
+    }
+    children = [terrain_block]
+    if water_z is not None:
+        children.append({
+            "class": "WaterPlane",
+            "name": "theWater",
+            "position": [0.0, 0.0, water_z],
+        })
     return [
         {
             "class": "LevelInfo",
             "name": "theLevelInfo",
-            "canvasClearColor": [0.4, 0.6, 0.8, 1.0],
-            "fogDensity": 0.0001,
-            "fogDensityOffset": 0,
-            "fogAtmosphereHeight": 1000,
+            "canvasClearColor": [1, 1, 1, 255],
+            "enabled": "1",
+            "fogColor": [0.66, 0.88, 0.99, 1],
+            "fogDensity": 0.0005,
+            "fogDensityOffset": 2,
+            "fogAtmosphereHeight": 800,
             "globalEnviromentMap": "BNG_Sky_02_cubemap",
             "gravity": -9.81,
-            "nearClip": 0.1,
-            "visibleDistance": 4000,
+            "soundAmbience": "AudioAmbienceDefault",
+            "visibleDistance": 4500,
         },
         {
             "class": "TimeOfDay",
             "name": "tod",
-            "startTime": 0.20,
+            "axisTilt": 20,
+            "play": False,
+            "startTime": 0.40,
+            "time": 0.40,
         },
         {
             "class": "ScatterSky",
             "name": "sunsky",
-            "ambientScaleGradientFile": "art/sky_gradients/default/gradient_ambient.png",
-            "colorizeGradientFile":     "art/sky_gradients/default/gradient_colorize.png",
-            "fogScaleGradientFile":     "art/sky_gradients/default/gradient_fog.png",
-            "sunScaleGradientFile":     "art/sky_gradients/default/gradient_sunscale.png",
-            "enableFogFallBack": False,
-            "shadowDistance": 1500,
-            "skyBrightness": 40,
-            "texSize": 2048,
-        },
-        {
-            "class": "Sun",
-            "name": "theSun",
             "azimuth": 230,
-            "elevation": 35,
-            "color": [1.0, 0.95, 0.85, 1.0],
-            "ambient": [0.30, 0.32, 0.35, 1.0],
-            "brightness": 1.0,
+            "elevation": 45,
+            "ambientScale":      [0.55, 0.55, 0.55, 1],
+            "colorize":          [0.42, 0.61, 0.87, 1],
+            "colorizeAmount":    2,
+            "fogScale":          [0.69, 0.85, 0.99, 1],
+            "sunScale":          [1, 0.90, 0.83, 1],
+            "enableFogFallBack": False,
+            "exposure":          15,
+            "flareScale": 5,
+            "flareType": "BNG_SunFlare_3",
+            "lastSplitTerrainOnly": True,
+            "logWeight": 0.99,
+            "mieScattering": 0.000363,
+            "rayleighScattering": 0.01,
+            "shadowDistance": 1600,
+            "shadowSoftness": 0.2,
+            "skyBrightness": 40,
+            "texSize": 1024,
         },
         {
             "class": "SimGroup",
             "name": "Other",
-            "children": [
-                {
-                    "class": "TerrainBlock",
-                    "name": "theTerrain",
-                    "terrainFile": f"/levels/{level_name}/theTerrain.terrain.json",
-                    "position":  [-half, -half, terrain_min_m],
-                    "scale":     [1, 1, 1],
-                    "castShadows": True,
-                    "squareSize": size_m / 2048,  # metres per heightmap texel
-                },
-            ],
+            "childs": children,
         },
     ]
 
@@ -261,74 +430,116 @@ def _spawn_objects(spawn_x: float, spawn_y: float, spawn_z: float) -> list[dict]
         "dataBlock": "SpawnSphereMarker",
         "position": [spawn_x, spawn_y, spawn_z],
         "rotationMatrix": [1, 0, 0, 0, 1, 0, 0, 0, 1],
-        "radius": 5,
+        "enabled": "1",
+        "homingCount": "0",
+        "indoorWeight": "1",
+        "isAIControlled": "0",
+        "lockCount": "0",
+        "outdoorWeight": "1",
+        "radius": 1,
+        "sphereWeight": "1",
         "spawnTransform": "0 0 0 0 0 1 0",
     }]
 
 
-def _mission_group(level_name: str, size_m: float, terrain_min_m: float, terrain_max_m: float,
-                   spawn_xyz: tuple[float, float, float],
-                   buildings: Sequence[BuildingPlacement],
-                   foliage: FoliageResult | None,
-                   roads: Sequence[DecalRoad]) -> dict:
+def _mission_group(
+    level_name: str,
+    size_m: float,
+    size_px: int,
+    terrain_min_m: float,
+    terrain_max_m: float,
+    spawn_xyz: tuple[float, float, float],
+    buildings: Sequence[BuildingPlacement],
+    foliage: FoliageResult | None,
+    roads: Sequence[DecalRoad],
+    water_z: float | None = None,
+) -> dict:
     sx, sy, sz = spawn_xyz
     children = [
         {
-            "class": "SimGroup", "name": "PlayerDropPoints",
-            "children": _spawn_objects(sx, sy, sz),
+            "class": "SimGroup",
+            "name": "PlayerDropPoints",
+            "childs": _spawn_objects(sx, sy, sz),
         },
         {
-            "class": "SimGroup", "name": "Level_objects",
-            "children": _level_objects(level_name, size_m, terrain_min_m, terrain_max_m, sx, sy, sz),
+            "class": "SimGroup",
+            "name": "Level_objects",
+            "childs": _level_objects(level_name, size_m, size_px,
+                                     terrain_min_m, terrain_max_m, water_z=water_z),
         },
     ]
     if buildings:
         children.append({
             "class": "SimGroup",
             "name": "buildings",
-            "children": _building_tsstatics(level_name, buildings),
+            "childs": _building_tsstatics(level_name, buildings),
         })
     if foliage and foliage.trees:
         children.append({
             "class": "SimGroup",
             "name": "trees",
-            "children": _tree_tsstatics(level_name, foliage.trees),
+            "childs": _tree_tsstatics(level_name, foliage.trees),
         })
     if foliage and foliage.hedges:
         children.append({
             "class": "SimGroup",
             "name": "hedges",
-            "children": _hedge_tsstatics(level_name, foliage.hedges),
+            "childs": _hedge_tsstatics(level_name, foliage.hedges),
         })
     if roads:
         children.append({
             "class": "SimGroup",
             "name": "Decal_Roads",
-            "children": _decal_roads_objects(roads),
+            "childs": _decal_roads_objects(roads),
         })
-    return {"class": "SimGroup", "name": "MissionGroup", "children": children}
-
-
-def _items_level_root(level_name: str, size_m: float, t_min: float, t_max: float,
-                      spawn: tuple[float, float, float],
-                      buildings: Sequence[BuildingPlacement],
-                      foliage: FoliageResult | None,
-                      roads: Sequence[DecalRoad]) -> dict:
-    return {
-        "class": "SimGroup",
-        "name": "MissionCleanup",
-        "children": [_mission_group(level_name, size_m, t_min, t_max, spawn,
-                                    buildings, foliage, roads)],
-    }
+    return {"class": "SimGroup", "name": "MissionGroup", "childs": children}
 
 
 # ---------------------------------------------------------------------------
-# Helpers — heightmap PNG (visualisation) + flat terrain.png placeholder
+# NDJSON scene-tree emitter (vanilla BeamNG format)
 # ---------------------------------------------------------------------------
+
+def _emit_ndjson_tree(scene_root: dict, base_main_path: str, write_func) -> None:
+    """Walk a nested SimGroup tree and write per-group items.level.json files."""
+
+    def _ensure_pid(obj: dict) -> None:
+        if "persistentId" not in obj:
+            obj["persistentId"] = str(uuid.uuid4())
+
+    def _write_group(group: dict, path_segments: list[str]) -> None:
+        group_name = group["name"]
+        children = group.get("childs", []) or []
+        rel_dir = "/".join(path_segments + [group_name])
+        full_path = f"{base_main_path}/{rel_dir}/items.level.json"
+        lines = []
+        for child in children:
+            _ensure_pid(child)
+            child_copy = {k: v for k, v in child.items() if k != "childs"}
+            child_copy["__parent"] = group_name
+            lines.append(json.dumps(child_copy, separators=(",", ":")))
+        write_func(full_path, "\n".join(lines) + ("\n" if lines else ""))
+        for child in children:
+            if child.get("class") == "SimGroup":
+                _write_group(child, path_segments + [group_name])
+
+    _ensure_pid(scene_root)
+    root_line = {k: v for k, v in scene_root.items() if k != "childs"}
+    write_func(f"{base_main_path}/items.level.json",
+               json.dumps(root_line, separators=(",", ":")) + "\n")
+    _write_group(scene_root, [])
+
+
+# ---------------------------------------------------------------------------
+# Image helpers
+# ---------------------------------------------------------------------------
+
 def _heightmap_visual_png(heightmap_m: np.ndarray) -> bytes:
-    min_m = heightmap_m.min(); max_m = heightmap_m.max()
-    rng = max(max_m - min_m, 1e-6)
+    """16-bit greyscale PNG for the world editor's heightmap display."""
+    min_m = heightmap_m.min()
+    max_m = heightmap_m.max()
+    rng = max(float(max_m - min_m), 1e-6)
     quant = ((heightmap_m - min_m) / rng * 65535).clip(0, 65535).astype("<u2")
+    # Y-flip: .png row 0 = top (north), BeamNG editor expects this orientation
     img = Image.fromarray(quant[::-1, :], mode="I;16")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -336,22 +547,21 @@ def _heightmap_visual_png(heightmap_m: np.ndarray) -> bytes:
 
 
 def _flat_terrain_png(size: int = 1024, rgb: tuple[int, int, int] = (90, 110, 70)) -> bytes:
-    img = Image.new("RGB", (size, size), rgb)
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    Image.new("RGB", (size, size), rgb).save(buf, format="PNG")
     return buf.getvalue()
 
 
 def _solid_preview_png(size: int = 256) -> bytes:
-    img = Image.new("RGB", (size, size), (40, 60, 90))
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    Image.new("RGB", (size, size), (40, 60, 90)).save(buf, format="PNG")
     return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
 # Top-level export
 # ---------------------------------------------------------------------------
+
 @dataclass(frozen=True)
 class LevelPackage:
     zip_path: Path
@@ -382,10 +592,9 @@ def write_level_package(
     if heightmap_m.shape[1] != size_px:
         raise ValueError("heightmap must be square")
 
+    # Resolve material list and layer map
     if splat is not None:
         materials = [f"mat_{l.cls.key}" for l in splat.layers]
-        # splat.layer_index_map holds class IDs (0..9). Remap to material-array
-        # indices (0..len(materials)-1) — that's what the .ter writer wants.
         remap = np.zeros(256, dtype=np.uint8)
         for arr_idx, layer in enumerate(splat.layers):
             remap[layer.cls.id] = arr_idx
@@ -395,64 +604,93 @@ def write_level_package(
     else:
         materials = ["DefaultMaterial"]
 
-    # Write the .ter to a temp buffer
+    # Write .ter binary
     ter_path = out_dir / "_tmp_theTerrain.ter"
     t_min, t_max = write_ter(heightmap_m, ter_path, layer_map=layer_map, material_names=materials)
     ter_bytes = ter_path.read_bytes()
     ter_path.unlink()
 
-    # Spawn point: centre of terrain, lifted to terrain height + 3 m so the car
-    # doesn't spawn underground. BeamNG terrain space puts the SW corner at
-    # `position` from level_objects; with TerrainBlock.position = (-half, -half, min),
-    # the centre in world space is (0, 0, min + height_at_centre).
-    cy, cx = size_px // 2, size_px // 2
-    centre_h = float(heightmap_m[cy, cx])
+    # Optional WaterPlane (opt-in via env var — WaterPlane strict field set
+    # causes load failures unless we ship a fully validated field set)
+    water_z: float | None = None
+    if (os.environ.get("MAPNG_WATER_PLANE") == "1"
+            and splat is not None
+            and splat.layer_index_map is not None):
+        try:
+            from mapng_ai.pipeline.classmap import CLASSES as _C
+            water_id = next((c.id for c in _C.values() if c.key == "water"), None)
+            if water_id is not None:
+                hmap = heightmap_m
+                lmap = splat.layer_index_map[::-1, :]
+                if lmap.shape == hmap.shape:
+                    water_pixels = hmap[lmap == water_id]
+                    if water_pixels.size > 50:
+                        water_z = float(np.median(water_pixels)) - 0.10
+        except Exception:
+            water_z = None
+
+    # Spawn at terrain centre, 3 m above surface
+    centre_h = float(heightmap_m[size_px // 2, size_px // 2])
     spawn_xyz = (0.0, 0.0, centre_h + 3.0)
 
     base = f"levels/{level_name}"
-
     files: list[tuple[str, bytes]] = []
+
     def w(path: str, data: bytes | str) -> None:
         if isinstance(data, str):
             data = data.encode("utf-8")
         files.append((path, data))
 
-    # Top-level metadata
+    # ------------------------------------------------------------------
+    # Metadata
+    # ------------------------------------------------------------------
     w(f"{base}/info.json", json.dumps(_info_json(level_name, side_m), indent=2))
-    w(f"{base}/mainLevel.lua",
-      "-- MapNG-AI generated level\n-- (intentionally empty — Phase 2 minimum)\n")
+
+    foreign_levels: set[str] = set()
+    for b in buildings:
+        rel = b.asset.shape_relpath
+        if rel.startswith("levels/") and "/" in rel[len("levels/"):]:
+            foreign_levels.add(rel[len("levels/"):].split("/", 1)[0])
+    if foliage:
+        for t in foliage.trees:
+            rel = t.shape_relpath
+            if rel.startswith("levels/") and "/" in rel[len("levels/"):]:
+                foreign_levels.add(rel[len("levels/"):].split("/", 1)[0])
+    foreign_levels.discard(level_name)
+    w(f"{base}/mainLevel.lua", _main_level_lua(sorted(foreign_levels)))
     w(f"{base}/preview.png", _solid_preview_png())
 
-    # Terrain
+    # ------------------------------------------------------------------
+    # Terrain binary + JSON descriptor
+    # ------------------------------------------------------------------
     w(f"{base}/theTerrain.ter", ter_bytes)
     w(f"{base}/theTerrain.terrain.json",
-      json.dumps(_terrain_json(level_name, size_px, materials), indent=2))
+      json.dumps(_terrain_json(level_name, size_px, side_m, materials), indent=2))
     w(f"{base}/theTerrain.terrainheightmap.png", _heightmap_visual_png(heightmap_m))
 
-    # Materials JSON
+    # ------------------------------------------------------------------
+    # Terrain materials
+    # ------------------------------------------------------------------
     w(f"{base}/art/terrains/main.materials.json",
       json.dumps(_terrain_materials_json(level_name, side_m, splat), indent=2))
 
-    # Per-class PBR tiles (diffuse + optional normal + optional roughness)
-    # plus the splat opacity mask. Diffuse may be JPG (Poly Haven) or PNG
-    # (procedural fallback) — mirror its real extension into the zip.
+    # Per-class PBR diffuse + optional normal/roughness + opacity mask
     if splat is not None:
         for layer in splat.layers:
             key = layer.cls.key
             de = layer.diffuse_path.suffix.lower()
-            w(f"{base}/art/terrains/diffuse_{key}{de}",
-              layer.diffuse_path.read_bytes())
-            w(f"{base}/art/terrains/opacity_{key}.png",
-              layer.opacity_path.read_bytes())
+            w(f"{base}/art/terrains/diffuse_{key}{de}", layer.diffuse_path.read_bytes())
+            # Opacity PNGs are kept in the zip for the world editor; they are NOT
+            # referenced in materials.json (blending is encoded in .ter layerMap).
+            w(f"{base}/art/terrains/opacity_{key}.png", layer.opacity_path.read_bytes())
             if layer.normal_path is not None:
                 ne = layer.normal_path.suffix.lower()
-                w(f"{base}/art/terrains/normal_{key}{ne}",
-                  layer.normal_path.read_bytes())
+                w(f"{base}/art/terrains/normal_{key}{ne}", layer.normal_path.read_bytes())
             if layer.roughness_path is not None:
                 re_ = layer.roughness_path.suffix.lower()
-                w(f"{base}/art/terrains/rough_{key}{re_}",
-                  layer.roughness_path.read_bytes())
-    # The base diffuse: real satellite imagery if available, else procedural blend
+                w(f"{base}/art/terrains/rough_{key}{re_}", layer.roughness_path.read_bytes())
+
+    # Base diffuse texture (single large image that covers the whole terrain)
     if terrain_png_bytes is not None:
         w(f"{base}/art/terrains/terrain.png", terrain_png_bytes)
     elif splat is not None:
@@ -460,12 +698,19 @@ def write_level_package(
     else:
         w(f"{base}/art/terrains/terrain.png", _flat_terrain_png())
 
-    # Building shapes — one DAE/GLB per unique resolved file. Three sources:
-    #   1. AI-generated GLBs at art/shapes/buildings_ai/  → Meshy cache
-    #   2. Region-pack library GLBs at art/shapes/buildings_lib/  → assets/buildings/
-    #   3. Procedural placeholder DAEs at art/shapes/buildings/  → cache/shapes/
+    # ------------------------------------------------------------------
+    # Road textures + materials
+    # ------------------------------------------------------------------
+    if decal_roads:
+        w(f"{base}/art/road/road_decal.png", write_road_decal_texture().read_bytes())
+        w(f"{base}/art/road/drive_decal.png", write_drive_decal_texture().read_bytes())
+        w(f"{base}/art/road/main.materials.json",
+          json.dumps(_road_materials_json(level_name), indent=2))
+
+    # ------------------------------------------------------------------
+    # Building shapes
+    # ------------------------------------------------------------------
     from mapng_ai.assets.library import building_library_fs_path
-    from mapng_ai.assets.meshy import _CACHE_DIR as _MESHY_CACHE
     if buildings:
         seen: set[str] = set()
         for b in buildings:
@@ -473,76 +718,69 @@ def write_level_package(
             if rel in seen:
                 continue
             seen.add(rel)
-
-            # 2) Region-pack library
+            if rel.startswith("levels/"):
+                continue
             lib_fs = building_library_fs_path(rel)
             if lib_fs is not None:
                 w(f"{base}/{rel}", lib_fs.read_bytes())
                 continue
-
-            # 1) Direct Meshy (legacy path; still supported)
-            if rel.startswith("art/shapes/buildings_ai/"):
-                stem = Path(rel).stem.replace("meshy_", "")
-                glb = _MESHY_CACHE / f"{stem}.glb"
-                if glb.exists():
-                    w(f"{base}/{rel}", glb.read_bytes())
-                    continue
-
-            # 3) Placeholder DAE fallback
             cache_path, fallback_rel = write_pitched_dae(
                 b.asset.type_label.replace("_meshy", "")
             )
             w(f"{base}/{rel if rel.endswith('.dae') else fallback_rel}",
               cache_path.read_bytes())
 
-    # Foliage shapes — bundle every unique tree shape used + the placeholder DAE
-    # if any tree falls back to it. Library trees live in assets/trees/<species>/.
+    # ------------------------------------------------------------------
+    # Foliage shapes (trees + hedges)
+    # ------------------------------------------------------------------
     if foliage and (foliage.trees or foliage.hedges):
         from mapng_ai.assets.library import tree_library
-        seen_tree_shapes: set[str] = set()
+        seen_tree: set[str] = set()
         if foliage.trees:
             tree_lib = tree_library()
-            # Map rel_path → fs_path for fast lookup
             lib_lookup: dict[str, Path] = {}
             for entries in tree_lib.values():
                 for e in entries:
                     lib_lookup[e.rel_path] = e.fs_path
             for t in foliage.trees:
                 rel = t.shape_relpath
-                if rel in seen_tree_shapes:
+                if rel in seen_tree:
                     continue
-                seen_tree_shapes.add(rel)
+                seen_tree.add(rel)
+                if rel.startswith("levels/"):
+                    continue
                 if rel in lib_lookup:
                     w(f"{base}/{rel}", lib_lookup[rel].read_bytes())
                 else:
                     placeholder_path, _ = write_tree_dae()
                     w(f"{base}/{rel}", placeholder_path.read_bytes())
         if foliage.hedges:
-            hedge_path, _ = write_hedge_dae()
-            w(f"{base}/art/shapes/foliage/hedge.dae", hedge_path.read_bytes())
+            mats = {getattr(h, "material", "hedge") for h in foliage.hedges}
+            if "hedge" in mats:
+                p, _ = write_hedge_dae()
+                w(f"{base}/art/shapes/foliage/hedge.dae", p.read_bytes())
+            if "wall" in mats:
+                p, _ = write_wall_dae()
+                w(f"{base}/art/shapes/foliage/wall.dae", p.read_bytes())
+            if "fence" in mats:
+                p, _ = write_fence_dae()
+                w(f"{base}/art/shapes/foliage/fence.dae", p.read_bytes())
+            if "gate" in mats:
+                p, _ = write_gate_dae()
+                w(f"{base}/art/shapes/foliage/gate.dae", p.read_bytes())
 
-    # Decal road material + texture
-    if decal_roads:
-        road_tex = write_road_decal_texture()
-        w(f"{base}/art/road/road_decal.png", road_tex.read_bytes())
-        decal_mat = {
-            "MapNG_RoadDecal": {
-                "class": "Material",
-                "name": "MapNG_RoadDecal",
-                "diffuseMap": [f"levels/{level_name}/art/road/road_decal.png", "", "", ""],
-                "translucentBlendOp": "PreMulAlpha",
-                "translucent": True,
-                "alphaTest": False,
-            }
-        }
-        w(f"{base}/art/road/main.materials.json", json.dumps(decal_mat, indent=2))
+    # ------------------------------------------------------------------
+    # Scene graph (NDJSON items.level.json files)
+    # ------------------------------------------------------------------
+    scene_root = _mission_group(
+        level_name, side_m, size_px, t_min, t_max, spawn_xyz,
+        buildings, foliage, decal_roads, water_z=water_z,
+    )
+    _emit_ndjson_tree(scene_root, f"{base}/main", w)
 
-    # Scene graph (the SimGroup tree BeamNG loads)
-    items = _items_level_root(level_name, side_m, t_min, t_max, spawn_xyz,
-                              buildings, foliage, decal_roads)
-    w(f"{base}/main/items.level.json", json.dumps(items, indent=2))
-
+    # ------------------------------------------------------------------
     # Build the ZIP
+    # ------------------------------------------------------------------
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         for path, data in files:
             zf.writestr(path, data)

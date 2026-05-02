@@ -66,9 +66,13 @@ _LANDUSE_MAP: dict[tuple[str, str], int] = {
     ("landuse", "meadow"):    3,
     ("landuse", "farmland"):  3,
     ("landuse", "farmyard"):  4,
-    ("landuse", "residential"): 1,
+    # Residential = lawn (manicured grass), NOT concrete. Real
+    # residential plots in NI are 90% grass; the buildings on top
+    # already cover the built-up parts. Painting residential as concrete
+    # turned every village into a sea of grey.
+    ("landuse", "residential"): 2,
     ("landuse", "commercial"):  1,
-    ("landuse", "industrial"):  1,
+    ("landuse", "industrial"):  4,        # bare earth — industrial yards
     ("landuse", "retail"):      1,
     ("landuse", "construction"): 4,
     ("landuse", "quarry"):    4,
@@ -187,7 +191,11 @@ def build_class_map(osm: OSMData, region: Region, size: int) -> np.ndarray:
                 water_shapes.append((poly, 6))
     _rasterise(water_shapes)
 
-    # 3) Roads (highest priority, painted on top)
+    # 3) Roads — painted as ASPHALT class for ground physics. The actual
+    # road visual is provided by DecalRoad objects on top of the terrain;
+    # the class-map paint matches that decal's centreline so vehicles
+    # get road-grade grip. Verges removed — they were creating a wide
+    # grey slab effect in BeamNG that overwhelmed the actual road decal.
     road_shapes = []
     for w in osm.ways:
         tags = w.get("tags") or {}

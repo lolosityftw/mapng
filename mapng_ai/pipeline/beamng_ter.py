@@ -1,17 +1,28 @@
 """BeamNG terrain `.ter` (version 9) binary writer.
 
-Format ported from MapNG `services/exportTer.js`:
+Format from BeamNG terrain.json `binaryFormat` declaration:
+
+    version, size, heightMap, layerMap, layerTextureMap, materialNames
+
+i.e.
 
     [u8 version=9]
     [u32 size]                                — square side length, LE
-    [u16 height × size² ]                     — quantised heightmap, LE
+    [u16 heightMap × size²]                   — quantised heightmap, LE
                                                 row 0 = SOUTH edge, x increases EAST
-    [u8  layerIndex × size² ]                 — material layer index per pixel,
-                                                row 0 = SOUTH edge (no Y-flip)
+    [u8  layerMap × size²]                    — material layer index per pixel
+    [u8  layerTextureMap × size²]             — texture variant per pixel (0 default)
     [u32 materialCount]                       — LE
     repeat materialCount times:
         [u8 nameLen] OR [u8 0xFF, u16 nameLen]
         [u8 × nameLen] UTF-8 name
+
+Earlier versions of this writer omitted `layerTextureMap`. That left
+BeamNG reading `materialCount` from the byte that should have been the
+first pixel of the (missing) texture map — typically a small uint
+representing 0..N material indices — and then trying to decode that
+many UTF-8 strings from random terrain bytes. The result was a silent
+parse failure → terrain block initialised with no surface.
 """
 from __future__ import annotations
 
@@ -69,11 +80,18 @@ def write_ter(
         else:
             name_blocks.append(b"\xff" + len(encoded).to_bytes(2, "little") + encoded)
 
+    # layerTextureMap: per-pixel texture variant index. We don't use
+    # multi-variant textures yet, so it's all zeros (same byte count as
+    # layer_map). This block must exist in the file or BeamNG's parser
+    # gets out of sync reading materialCount.
+    layer_texture_map = np.zeros((size, size), dtype=np.uint8)
+
     with open(out_path, "wb") as f:
         f.write(b"\x09")                                    # version
         f.write(size.to_bytes(4, "little"))
         f.write(flipped_h.tobytes())
         f.write(flipped_layers.tobytes())
+        f.write(layer_texture_map.tobytes())
         f.write(len(material_names).to_bytes(4, "little"))
         for block in name_blocks:
             f.write(block)

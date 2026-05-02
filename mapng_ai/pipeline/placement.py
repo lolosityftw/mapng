@@ -23,7 +23,7 @@ from pyproj import Transformer
 from shapely.geometry import Polygon
 
 from mapng_ai.assets.base import AssetProvider, BuildingAsset
-from mapng_ai.pipeline.region import Region
+from mapng_ai.pipeline.region import Region, sample_terrain_height as _z_at
 from mapng_ai.sources.overpass import OSMData, way_polygon_ll
 
 
@@ -85,16 +85,7 @@ def _infer_levels_and_height(tags: dict, footprint_m2: float) -> tuple[int, floa
     return 1, 4.0
 
 
-def _z_at(heightmap_m: np.ndarray, side_m: float, x_m: float, y_m: float) -> float:
-    """Sample terrain height at (x, y) where origin is the terrain centre."""
-    size = heightmap_m.shape[0]
-    # Map x ∈ [-half, +half] → col ∈ [0, size-1], y likewise
-    half = side_m / 2
-    u = (x_m + half) / side_m
-    v = 1.0 - (y_m + half) / side_m   # heightmap row 0 = north (image top)
-    col = int(np.clip(round(u * (size - 1)), 0, size - 1))
-    row = int(np.clip(round(v * (size - 1)), 0, size - 1))
-    return float(heightmap_m[row, col])
+# `_z_at` is the canonical height sampler from region.py (imported above).
 
 
 def place_buildings(
@@ -144,14 +135,24 @@ def place_buildings(
         )
         nat_l, nat_w, nat_h = asset.natural_size_m
 
+        # Per-building deterministic jitter so neighbours don't read as
+        # exact clones even when they share an asset reference. ±4%
+        # scale on each axis + ±0.04 rad yaw nudge — enough to break
+        # repetition, small enough to keep the building square to the
+        # OBB long edge (which is the architecturally correct yaw).
+        jitter = np.random.default_rng(seed & 0xFFFFFFFF)
+        sj = float(jitter.uniform(0.96, 1.04))   # uniform across xy
+        szj = float(jitter.uniform(0.97, 1.03))  # vertical
+        yaw_jitter = float(jitter.uniform(-0.04, 0.04))
+
         # Per spec: scale uniformly, clamp to ±40 %
         target_scale = max(length / max(nat_l, 1e-3), width / max(nat_w, 1e-3))
         target_scale = max(0.6, min(1.4, target_scale))
-        scale_xyz = (length, width, height)  # for the unit-cube box.dae we scale axis-by-axis
+        scale_xyz = (length * sj, width * sj, height * szj)
         z = _z_at(heightmap_m, region.side_m, cx_local, cy_local)
         placements.append(BuildingPlacement(
             osm_id=seed, asset=asset,
             x_m=cx_local, y_m=cy_local, z_m=z,
-            yaw_rad=yaw, scale_xyz=scale_xyz,
+            yaw_rad=yaw + yaw_jitter, scale_xyz=scale_xyz,
         ))
     return placements

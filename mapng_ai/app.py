@@ -17,7 +17,6 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from mapng_ai import config
-from mapng_ai.library_builder import build_library
 from mapng_ai.library_builder.runner import library_status
 from mapng_ai.pipeline import BBox, JobContext, run_pipeline
 
@@ -99,6 +98,15 @@ class GenerateRequest(BaseModel):
     south: float = Field(..., ge=-90, le=90)
     east: float = Field(..., ge=-180, le=180)
     north: float = Field(..., ge=-90, le=90)
+    # Optional polygon vertices in [lon, lat] order — the user's drawn
+    # shape, ANY shape (not just a rectangle). When set, features
+    # outside the polygon get clipped before the BeamNG export.
+    polygon: list[list[float]] | None = None
+    # Optional explicit terrain side length in metres. None = use the
+    # larger of the bbox's projected width/height (clamped 500..8000).
+    size_m: float | None = Field(None, ge=500, le=8000)
+    # Optional Esri imagery zoom. None = use the source default (18).
+    imagery_zoom: int | None = Field(None, ge=14, le=20)
 
 
 class GenerateResponse(BaseModel):
@@ -213,6 +221,46 @@ async def health() -> dict:
     return {"ok": True, "version": app.version}
 
 
+class PreviewRequest(BaseModel):
+    west: float = Field(..., ge=-180, le=180)
+    south: float = Field(..., ge=-90, le=90)
+    east: float = Field(..., ge=-180, le=180)
+    north: float = Field(..., ge=-90, le=90)
+
+
+@app.post("/api/preview-area")
+async def preview_area(req: PreviewRequest) -> dict:
+    """Cheap lookup of how many OSM features (buildings, roads, water,
+    landuse polygons) live inside a bbox. Lets the UI tell the user
+    what they'll get before they hit Generate. Uses Overpass with the
+    same caching as the main pipeline so a subsequent Generate hits
+    the cache and skips re-fetch."""
+    if req.east <= req.west or req.north <= req.south:
+        raise HTTPException(400, "Invalid bbox")
+    from mapng_ai.sources.overpass import fetch_osm
+    bbox = BBox(req.west, req.south, req.east, req.north)
+    try:
+        osm = await fetch_osm(bbox)
+    except Exception as exc:
+        raise HTTPException(502, f"Overpass fetch failed: {exc}")
+    n_buildings = sum(1 for w in osm.ways if "building" in (w.get("tags") or {}))
+    n_roads = sum(1 for w in osm.ways if "highway" in (w.get("tags") or {}))
+    n_water = sum(1 for w in osm.ways
+                  if (w.get("tags") or {}).get("waterway") or
+                     (w.get("tags") or {}).get("natural") == "water")
+    n_landuse = sum(1 for w in osm.ways if "landuse" in (w.get("tags") or {}))
+    n_barriers = sum(1 for w in osm.ways if "barrier" in (w.get("tags") or {}))
+    return {
+        "n_buildings": n_buildings,
+        "n_roads": n_roads,
+        "n_water": n_water,
+        "n_landuse": n_landuse,
+        "n_barriers": n_barriers,
+        "n_ways_total": len(osm.ways),
+        "n_relations": len(osm.relations),
+    }
+
+
 @app.post("/api/generate", response_model=GenerateResponse)
 async def generate(req: GenerateRequest) -> GenerateResponse:
     if req.east <= req.west or req.north <= req.south:
@@ -220,10 +268,16 @@ async def generate(req: GenerateRequest) -> GenerateResponse:
 
     job_id = uuid.uuid4().hex[:12]
     out_dir = config.OUTPUT_DIR / job_id
+    polygon_ll = None
+    if req.polygon and len(req.polygon) >= 3:
+        polygon_ll = [(float(p[0]), float(p[1])) for p in req.polygon]
     ctx = JobContext(
         job_id=job_id,
         bbox_ll=BBox(req.west, req.south, req.east, req.north),
         out_dir=out_dir,
+        requested_size_m=req.size_m,
+        imagery_zoom=req.imagery_zoom,
+        polygon_ll=polygon_ll,
     )
     job = _Job(ctx)
     _jobs[job_id] = job
@@ -268,6 +322,22 @@ async def get_library_status() -> dict:
     return library_status()
 
 
+@app.get("/api/beamng/status")
+async def get_beamng_status() -> dict:
+    """Reports whether MAPNG_BEAMNG_PATH (or a default Steam location)
+    yielded a usable BeamNG install, and how many shapes the scanner
+    catalogued. Drives the BeamNG tab in the Asset Browser."""
+    from mapng_ai.sources.beamng_assets import install_status
+    return install_status()
+
+
+@app.post("/api/beamng/rescan")
+async def post_beamng_rescan() -> dict:
+    from mapng_ai.sources.beamng_assets import reset_scan_cache, install_status
+    reset_scan_cache()
+    return install_status()
+
+
 @app.get("/api/library/catalogue")
 async def get_library_catalogue() -> dict:
     """Full catalogue + per-entry built/missing state, for the UI to render
@@ -281,7 +351,8 @@ async def get_library_catalogue() -> dict:
             "slug": e.slug,
             "category": e.category,
             "type": e.type,
-            "prompt": e.prompt,
+            "prompt": e.description,        # legacy key for the UI
+            "description": e.description,
             "footprint_m": list(e.footprint_m),
             "levels": e.levels,
             "built": glb.exists() and glb.stat().st_size > 0,
@@ -290,108 +361,42 @@ async def get_library_catalogue() -> dict:
     return {"entries": out}
 
 
-class LibraryBuildRequest(BaseModel):
-    categories: list[str] | None = None     # None = all
-    force: bool = False                     # True = wipe cache, re-roll textures
+# Stub kept for legacy clients — Meshy generation is gone.
+@app.post("/api/library/import-pack")
+async def post_import_pack(file: UploadFile = File(...)) -> dict:
+    """Import a zip of CC0 assets (Quaternius, Kenney, etc.). Files are
+    auto-categorised by filename heuristics and copied under
+    assets/<category>s/<type>/. Returns a counts summary."""
+    from mapng_ai.library_builder.pack_import import import_zip
+    body = await file.read()
+    if not body:
+        raise HTTPException(400, "empty file")
+    if not file.filename or not file.filename.lower().endswith(".zip"):
+        raise HTTPException(400, "expected a .zip archive")
+    result = await asyncio.to_thread(import_zip, body)
+    return {
+        "imported": result.imported,
+        "skipped": result.skipped,
+        "by_category": result.by_category,
+        "errors": result.errors[:20],   # cap error list size
+    }
 
 
 @app.post("/api/library/build")
-async def post_library_build(req: LibraryBuildRequest) -> dict:
-    job_id = uuid.uuid4().hex[:12]
-    queue: asyncio.Queue[tuple[str, dict] | None] = asyncio.Queue()
-
-    class _LibJob:
-        def __init__(self):
-            self.queue = queue
-            self.done = False
-            self.ctx = type("ctx", (), {"out_dir": config.OUTPUT_DIR})()  # dummy
-
-        async def emit(self, event: str, data: dict) -> None:
-            await self.queue.put((event, data))
-
-        async def close(self) -> None:
-            self.done = True
-            await self.queue.put(None)
-
-    job = _LibJob()
-    _library_jobs[job_id] = job
-
-    async def _run():
-        try:
-            await build_library(categories=req.categories, force=req.force, emit=job.emit)
-        except Exception as exc:
-            await job.emit("batch:error", {"message": f"{type(exc).__name__}: {exc}"})
-        finally:
-            await job.close()
-
-    asyncio.create_task(_run())
-    return {"job_id": job_id}
-
-
-class SingleBuildRequest(BaseModel):
-    slug: str
-    force: bool = False     # if True, regenerate even if cached
+async def post_library_build_disabled() -> dict:
+    raise HTTPException(
+        status_code=410,
+        detail="Asset generation has been removed. Import a CC0 pack via "
+               "/api/library/import-pack or drag a .glb onto an entry.",
+    )
 
 
 @app.post("/api/library/build/single")
-async def build_single_entry(req: SingleBuildRequest) -> dict:
-    """Generate (or regenerate) one specific catalogue entry."""
-    from mapng_ai.assets.meshy import MeshyEngine
-    from mapng_ai.library_builder import CATALOGUE
-    from mapng_ai.library_builder.runner import target_glb, manifest_path, target_dir
-
-    entry = next((e for e in CATALOGUE if e.slug == req.slug), None)
-    if entry is None:
-        raise HTTPException(404, f"unknown slug: {req.slug}")
-
-    glb = target_glb(entry)
-    if req.force and glb.exists():
-        glb.unlink()
-
-    job_id = uuid.uuid4().hex[:12]
-    queue: asyncio.Queue[tuple[str, dict] | None] = asyncio.Queue()
-
-    class _LibJob:
-        def __init__(self):
-            self.queue = queue
-            self.done = False
-
-        async def emit(self, event: str, data: dict) -> None:
-            await self.queue.put((event, data))
-
-        async def close(self) -> None:
-            self.done = True
-            await self.queue.put(None)
-
-    job = _LibJob()
-    _library_jobs[job_id] = job
-
-    async def _run():
-        try:
-            from mapng_ai.library_builder.runner import _gen_one, LibraryProgress
-            engine = MeshyEngine()
-            if not engine.configured:
-                await job.emit("batch:error", {"message": "Meshy not configured"})
-                return
-            progress = LibraryProgress(total=1, completed=0, skipped=0, failed=0, in_progress=[])
-            await job.emit("batch:start", {
-                "total": 1, "categories": [entry.category],
-                "concurrency": engine.concurrency, "rps": engine.rps,
-                "texture": engine.texture,
-            })
-            sem = asyncio.Semaphore(1)
-            await _gen_one(entry, engine, sem, progress, job.emit)
-            await job.emit("batch:done", {
-                "total": 1, "completed": progress.completed,
-                "skipped": progress.skipped, "failed": progress.failed,
-            })
-        except Exception as exc:
-            await job.emit("batch:error", {"message": f"{type(exc).__name__}: {exc}"})
-        finally:
-            await job.close()
-
-    asyncio.create_task(_run())
-    return {"job_id": job_id}
+async def build_single_entry_disabled() -> dict:
+    raise HTTPException(
+        status_code=410,
+        detail="Single-entry generation has been removed.",
+    )
 
 
 class PromptOverrideRequest(BaseModel):
@@ -409,25 +414,24 @@ async def get_entry_prompt(slug: str) -> dict:
     override = get_prompt_override(slug)
     return {
         "slug": slug,
-        "default": entry.prompt,
+        "default": entry.description,
         "override": override,
-        "effective": override or entry.prompt,
+        "effective": override or entry.description,
     }
 
 
 @app.post("/api/library/entries/{slug}/prompt")
 async def set_entry_prompt(slug: str, req: PromptOverrideRequest) -> dict:
     from mapng_ai.library_builder import CATALOGUE
-    from mapng_ai.library_builder.catalogue import set_prompt_override, get_prompt_override
+    from mapng_ai.library_builder.catalogue import set_prompt_override
     entry = next((e for e in CATALOGUE if e.slug == slug), None)
     if entry is None:
         raise HTTPException(404, f"unknown slug: {slug}")
     p = (req.prompt or "").strip() or None
-    # Don't store the override if it equals the default
-    if p == entry.prompt:
+    if p == entry.description:
         p = None
     set_prompt_override(slug, p)
-    return {"slug": slug, "override": p, "effective": p or entry.prompt}
+    return {"slug": slug, "override": p, "effective": p or entry.description}
 
 
 @app.post("/api/library/entries/{slug}/upload")
@@ -605,6 +609,15 @@ async def get_road_decal() -> FileResponse:
                         headers={"Cache-Control": "public, max-age=86400"})
 
 
+@app.get("/api/drive-decal")
+async def get_drive_decal() -> FileResponse:
+    """Brown dirt + wheel-rut tile for driveways."""
+    from mapng_ai.pipeline.decal_roads import write_drive_decal_texture
+    p = await asyncio.to_thread(write_drive_decal_texture)
+    return FileResponse(p, media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
 @app.get("/api/pbr/{class_key}/{map_kind}")
 async def get_pbr_map(class_key: str, map_kind: str) -> FileResponse:
     """Serve a Poly Haven PBR map (diffuse / normal / roughness) for the
@@ -713,20 +726,7 @@ async def set_active_quality_api(req: ActiveQualityRequest) -> dict:
     return {"quality": q}
 
 
-class MeshyPolycountRequest(BaseModel):
-    polycount: int = 0
-
-
-@app.get("/api/library/meshy-polycount")
-async def get_meshy_polycount_api() -> dict:
-    from mapng_ai.library_builder.optimise import get_meshy_max_polycount
-    return {"polycount": get_meshy_max_polycount()}
-
-
-@app.post("/api/library/meshy-polycount")
-async def set_meshy_polycount_api(req: MeshyPolycountRequest) -> dict:
-    from mapng_ai.library_builder.optimise import set_meshy_max_polycount
-    return {"polycount": set_meshy_max_polycount(req.polycount)}
+# /api/library/meshy-polycount endpoints removed — Meshy integration dropped.
 
 
 # ---- Pre-bake quality variants ----------------------------------------------
@@ -842,6 +842,35 @@ async def post_optimise_one(slug: str) -> dict:
 
     asyncio.create_task(_run())
     return {"job_id": job_id}
+
+
+# ---- Sky HDRI ---------------------------------------------------------------
+@app.get("/api/sky/status")
+async def get_sky_status() -> dict:
+    from mapng_ai.library_builder.sky_pack import status
+    return status()
+
+
+@app.post("/api/sky/download")
+async def post_sky_download(slug: str | None = None) -> dict:
+    """Fetch + cache a Poly Haven HDRI. Returns the saved size (bytes).
+    If `slug` is omitted, downloads the default overcast NI sky."""
+    from mapng_ai.library_builder.sky_pack import download, DEFAULT_SLUG, status
+    asset = await download(slug or DEFAULT_SLUG)
+    if asset is None:
+        raise HTTPException(502, "sky download failed")
+    return {"slug": asset.slug, "bytes": asset.bytes, "status": status()}
+
+
+@app.get("/api/sky/hdr")
+async def get_sky_hdr(slug: str | None = None) -> FileResponse:
+    """Serve the cached HDRI to the browser (preview.js fetches this)."""
+    from mapng_ai.library_builder.sky_pack import cached_path, DEFAULT_SLUG
+    p = cached_path(slug or DEFAULT_SLUG)
+    if p is None:
+        raise HTTPException(404, "no HDRI cached — POST /api/sky/download first")
+    return FileResponse(p, media_type="image/vnd.radiance",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
 
 # ---- Terrain PBR pack -------------------------------------------------------

@@ -176,6 +176,10 @@ def _build_tree(seed: int) -> trimesh.Trimesh:
 
 _TREE_REL = "art/shapes/foliage/tree.dae"
 _HEDGE_REL = "art/shapes/foliage/hedge.dae"
+_WALL_REL = "art/shapes/foliage/wall.dae"
+_FENCE_REL = "art/shapes/foliage/fence.dae"
+_GATE_REL = "art/shapes/foliage/gate.dae"
+_SHED_REL = "art/shapes/buildings/shed.dae"
 
 
 def write_tree_dae() -> tuple[Path, str]:
@@ -201,6 +205,62 @@ def write_hedge_dae() -> tuple[Path, str]:
         slab.visual.face_colors = _hex_to_rgba("#3F5A28")
         slab.export(cache_path)
     return cache_path, _HEDGE_REL
+
+
+def write_wall_dae() -> tuple[Path, str]:
+    """A 1×1×1 unit drystone-wall slab — same scaling convention as the
+    hedge but tinted weathered grey so a TSStatic referencing this DAE
+    in BeamNG reads as stone, not vegetation."""
+    cache_dir = config.CACHE_DIR / "shapes"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / "wall.dae"
+    if not cache_path.exists():
+        slab = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+        slab.apply_translation([0, 0, 0.5])
+        slab.visual.face_colors = _hex_to_rgba("#8A8479")
+        slab.export(cache_path)
+    return cache_path, _WALL_REL
+
+
+def write_fence_dae() -> tuple[Path, str]:
+    """Thin post-and-rail fence — 1×1×1 unit; placement scales X by length,
+    Z by height. Coloured weathered timber so it reads as a fence."""
+    cache_dir = config.CACHE_DIR / "shapes"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / "fence.dae"
+    if not cache_path.exists():
+        slab = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+        slab.apply_translation([0, 0, 0.5])
+        slab.visual.face_colors = _hex_to_rgba("#5C4A2C")
+        slab.export(cache_path)
+    return cache_path, _FENCE_REL
+
+
+def write_gate_dae() -> tuple[Path, str]:
+    """Wooden farm gate — short squat panel sized 4×0.1×1.3 m. Placed at
+    the spot where a hedge meets a road."""
+    cache_dir = config.CACHE_DIR / "shapes"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / "gate.dae"
+    if not cache_path.exists():
+        slab = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+        slab.apply_translation([0, 0, 0.5])
+        slab.visual.face_colors = _hex_to_rgba("#6E5530")
+        slab.export(cache_path)
+    return cache_path, _GATE_REL
+
+
+def write_shed_dae() -> tuple[Path, str]:
+    """Small farmyard shed — flat-roofed 1×1×1 unit, corrugated grey."""
+    cache_dir = config.CACHE_DIR / "shapes"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / "shed.dae"
+    if not cache_path.exists():
+        slab = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+        slab.apply_translation([0, 0, 0.5])
+        slab.visual.face_colors = _hex_to_rgba("#7A7A75")
+        slab.export(cache_path)
+    return cache_path, _SHED_REL
 
 
 # ---------------------------------------------------------------------------

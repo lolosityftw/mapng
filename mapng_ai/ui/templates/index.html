@@ -23,7 +23,7 @@
 <main>
 
   <section id="map-pane">
-    <h2>1. Pick a 2 km area</h2>
+    <h2>1. Pick an area</h2>
     <div id="map"></div>
     <div class="controls">
       <select id="preset" title="Jump the map to a known location">
@@ -34,7 +34,22 @@
         <option value="giants_causeway">Giant's Causeway</option>
         <option value="newcastle_mournes">Newcastle / Mourne</option>
       </select>
-      <div class="bbox-readout" id="bbox-readout">draw a rectangle on the map</div>
+      <select id="size-choice" title="Square terrain side length. 'Drawn' uses the larger of your drawn rectangle's dimensions.">
+        <option value="auto">size: drawn</option>
+        <option value="1000">1.0 km</option>
+        <option value="1500">1.5 km</option>
+        <option value="2000">2.0 km</option>
+        <option value="3000">3.0 km</option>
+        <option value="4000">4.0 km</option>
+        <option value="6000">6.0 km</option>
+      </select>
+      <select id="zoom-choice" title="Imagery zoom level. Higher = sharper textures, slower fetch (4× tiles per +1 zoom).">
+        <option value="auto">imagery: default (z18, 0.35 m/px)</option>
+        <option value="17">z17 (0.7 m/px) — fastest</option>
+        <option value="18">z18 (0.35 m/px) — recommended</option>
+        <option value="19">z19 (0.17 m/px) — slow but very sharp</option>
+      </select>
+      <div class="bbox-readout" id="bbox-readout">draw a polygon (click points, double-click to finish) or a rectangle on the map</div>
       <button id="generate" disabled>Generate</button>
     </div>
   </section>
@@ -62,18 +77,33 @@
       <summary>Grass tint</summary>
       <div class="slider-row">
         <label>Hue
-          <input type="range" id="grass-hue" min="-30" max="60" value="0" step="1" />
-          <span id="grass-hue-v">0°</span>
+          <input type="range" id="grass-hue" min="-30" max="60" value="60" step="1" />
+          <span id="grass-hue-v">60°</span>
         </label>
         <label>Saturation
-          <input type="range" id="grass-sat" min="0.5" max="2.0" value="1.30" step="0.05" />
-          <span id="grass-sat-v">1.30</span>
+          <input type="range" id="grass-sat" min="0.5" max="2.0" value="1.15" step="0.05" />
+          <span id="grass-sat-v">1.15</span>
         </label>
         <label>Brightness
-          <input type="range" id="grass-bri" min="0.5" max="1.6" value="1.10" step="0.05" />
-          <span id="grass-bri-v">1.10</span>
+          <input type="range" id="grass-bri" min="0.5" max="1.6" value="0.65" step="0.05" />
+          <span id="grass-bri-v">0.65</span>
         </label>
         <button id="grass-reset" class="ghost">Reset</button>
+      </div>
+    </details>
+    <details class="grass-controls" id="atmos-controls">
+      <summary>Atmosphere</summary>
+      <div class="slider-row">
+        <label>Wet roads
+          <input type="range" id="atmos-wetness" min="0" max="1" value="0" step="0.05" />
+          <span id="atmos-wetness-v">0.00</span>
+        </label>
+        <label>Cloud shadow
+          <input type="range" id="atmos-cloud" min="0" max="0.7" value="0.32" step="0.02" />
+          <span id="atmos-cloud-v">0.32</span>
+        </label>
+        <button id="hdri-download" class="ghost" title="Download a CC0 Poly Haven HDRI sky (~5 MB) and use it as the preview backdrop. One-time only — cached on disk.">Download HDRI sky</button>
+        <span id="hdri-status" class="atmos-readout">checking…</span>
       </div>
     </details>
     <small class="hint">Drag to orbit · scroll to zoom · drop quality if FPS lags.</small>

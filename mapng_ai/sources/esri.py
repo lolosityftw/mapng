@@ -26,7 +26,7 @@ from mapng_ai.sources.base import BBoxLL
 
 ESRI_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
 TILE_SIZE = 256
-DEFAULT_ZOOM = 17   # ~0.6 m/px at NI latitudes — drastic detail
+DEFAULT_ZOOM = 18   # ~0.35 m/px at NI latitudes — sub-metre aerial detail
 
 
 @dataclass(frozen=True)

@@ -31,6 +31,28 @@ _BLUR_SIGMA = 1.5
 _NOISE_SCALE = 32.0     # texels — the broader the more "patchy" the variation
 _NOISE_AMPLITUDE = 0.18  # ±18% of the layer's opacity
 
+# Per-class detail-blend strength inside build_detailed_terrain. 1.0 means
+# the satellite contributes nothing for that class; lower values let the
+# Esri imagery bleed through. The satellite tends to bake autumn / brown
+# bias into NI fields, so we push grass classes very high.
+_DETAIL_BLEND_PER_CLASS: dict[str, float] = {
+    "pasture":  0.98,
+    "lawn":     0.97,
+    "forest":   0.95,
+    "earth":    0.85,
+    "gravel":   0.85,
+    "concrete": 0.85,
+    "asphalt":  0.95,
+    "water":    0.30,        # let the satellite show some river colour
+}
+_DETAIL_BLEND_DEFAULT = 0.92
+
+# Per-field tint variation. Each Voronoi-style cell gets a small RGB
+# multiplier so adjacent fields read as visibly different greens — the
+# patchwork-quilt look you see flying over rural Ireland.
+_FIELD_GRID = 28        # cells across the terrain (= ~70m fields on a 2km map)
+_FIELD_SEED = 0xF1E1D
+
 
 @dataclass(frozen=True)
 class SplatLayer:
@@ -58,42 +80,95 @@ def _low_freq_noise(shape: tuple[int, int], scale: float, seed: int) -> np.ndarr
     return gaussian_filter(base, sigma=scale) * 6.0  # post-blur amplitude boost
 
 
+def _build_field_tint(H: int, W: int, *, seed: int = _FIELD_SEED) -> np.ndarray:
+    """Voronoi-cell field tints for the patchwork-quilt look.
+
+    Picks `_FIELD_GRID²` jittered cell centres, paints each pixel with the
+    nearest centre's small RGB multiplier (within ±15% per channel, biased
+    toward green so the overall hue stays believable). Returns float32
+    `(H, W, 3)` in roughly the [0.85, 1.18] range.
+    """
+    rng = np.random.default_rng(seed)
+    n = _FIELD_GRID
+    # Jittered grid centres in [0, 1]² so cells aren't perfectly aligned
+    gx, gy = np.meshgrid(
+        (np.arange(n) + 0.5 + rng.uniform(-0.4, 0.4, n)) / n,
+        (np.arange(n) + 0.5 + rng.uniform(-0.4, 0.4, n)) / n,
+        indexing="xy",
+    )
+    centres = np.stack([gx.ravel(), gy.ravel()], axis=1)  # (n*n, 2)
+    # Per-cell tint — biased green-up, slight red/blue down so adjacent
+    # cells alternate between yellow-green and blue-green naturally.
+    tints = np.empty((n * n, 3), dtype=np.float32)
+    tints[:, 0] = rng.uniform(0.90, 1.04, n * n)  # red
+    tints[:, 1] = rng.uniform(0.97, 1.10, n * n)  # green ← biased up
+    tints[:, 2] = rng.uniform(0.86, 1.02, n * n)  # blue
+    # Per-pixel nearest-cell lookup. Done at low res then upsampled.
+    LR = 256
+    yy, xx = np.meshgrid(np.linspace(0, 1, LR), np.linspace(0, 1, LR), indexing="ij")
+    px = np.stack([xx.ravel(), yy.ravel()], axis=1)  # (LR*LR, 2)
+    # Squared distance to each centre, vectorised. n*n=784, LR*LR=65536 →
+    # 784*65k = 51M floats = ~200 MB; chunk it to keep memory sane.
+    nearest = np.empty(LR * LR, dtype=np.int32)
+    chunk = 8192
+    for s in range(0, px.shape[0], chunk):
+        e = min(s + chunk, px.shape[0])
+        d2 = np.sum((px[s:e, None, :] - centres[None, :, :]) ** 2, axis=2)
+        nearest[s:e] = np.argmin(d2, axis=1)
+    tint_lr = tints[nearest].reshape(LR, LR, 3)
+    # Upsample to full resolution with a bit of softness on the boundaries
+    # so the cell edges read as gradual hedge-bordered transitions, not
+    # hard polygon seams.
+    tint_lr = gaussian_filter(tint_lr, sigma=(2.5, 2.5, 0))
+    pil = Image.fromarray(np.clip(tint_lr * 255 / 1.5, 0, 255).astype(np.uint8))
+    pil = pil.resize((W, H), Image.BILINEAR)
+    return np.asarray(pil, dtype=np.float32) * (1.5 / 255.0)
+
+
 def build_detailed_terrain(
     *,
     layers: list[SplatLayer],
     sat_rgb: np.ndarray,    # (size, size, 3) uint8 — Esri imagery
     out_path: Path,
     tile_count: int = 32,   # how many times each detail texture repeats across the terrain
-    detail_blend: float = 0.7,   # 0 = pure satellite, 1 = pure detail. 0.7 keeps colour from imagery
+    detail_blend: float | None = None,  # legacy single-blend; ignored when None
 ) -> Path:
     """Composite satellite + tiled per-class PBR diffuse, weighted by each
     class's opacity mask. One PNG you can drop on the terrain mesh as a
     single texture — no shader required.
 
+    Per-class detail-blend lifts (see `_DETAIL_BLEND_PER_CLASS`) suppress
+    the Esri imagery's brown autumn cast on grass / pasture / forest
+    pixels, while leaving river colour mostly to the satellite. Per-field
+    Voronoi tints are baked into the grass / pasture / forest pixels so
+    adjacent fields read as different greens — the rural-NI patchwork
+    look.
+
     Output is sized to the satellite (typically 2048²)."""
     H, W = sat_rgb.shape[:2]
-    # Detail layer accumulator (RGB float32) and total opacity
     detail = np.zeros((H, W, 3), dtype=np.float32)
     total_op = np.zeros((H, W), dtype=np.float32)
+    # Effective per-pixel detail-blend strength (weighted by class).
+    eff_blend = np.zeros((H, W), dtype=np.float32)
+    # Mask of pixels covered by green-class layers (for field tinting).
+    green_mask = np.zeros((H, W), dtype=np.float32)
 
-    # Per-tile size in the composite
     tile_h = max(1, H // tile_count)
     tile_w = max(1, W // tile_count)
+    GRASS_KEYS = {"pasture", "lawn", "forest"}
 
     for layer in layers:
         if layer.source != "polyhaven":
-            continue            # procedural fallback skipped here
+            continue
         try:
             with Image.open(layer.diffuse_path) as pil:
                 pil = pil.convert("RGB").resize((tile_w, tile_h), Image.LANCZOS)
                 tile = np.asarray(pil, dtype=np.float32)
         except Exception:
             continue
-        # Tile to full size by repetition
         ny = (H + tile_h - 1) // tile_h
         nx = (W + tile_w - 1) // tile_w
         tiled = np.tile(tile, (ny, nx, 1))[:H, :W]
-        # Resize the opacity mask to the composite resolution
         try:
             with Image.open(layer.opacity_path) as op_pil:
                 op_pil = op_pil.convert("L").resize((W, H), Image.BILINEAR)
@@ -102,15 +177,30 @@ def build_detailed_terrain(
             continue
         detail += tiled * op[..., None]
         total_op += op
+        # Per-class blend lift — single-blend caller (legacy) overrides it
+        cls_blend = (detail_blend if detail_blend is not None
+                     else _DETAIL_BLEND_PER_CLASS.get(layer.cls.key, _DETAIL_BLEND_DEFAULT))
+        eff_blend += op * cls_blend
+        if layer.cls.key in GRASS_KEYS:
+            green_mask += op
 
     # Where total_op > 0, normalise; elsewhere keep zero
     safe = np.where(total_op > 1e-3, total_op, 1.0)
     detail /= safe[..., None]
+    eff_blend /= safe                              # opacity-weighted average
+    green_mask = np.clip(green_mask, 0.0, 1.0)
+
+    # ---- per-field tint variation (grass classes only) ----
+    if green_mask.max() > 0.05:
+        ftint = _build_field_tint(H, W)            # (H, W, 3) ~[0.85, 1.18]
+        # Lerp toward the tint by green_mask so non-grass pixels are unaffected
+        tint_w = green_mask[..., None]
+        detail = detail * (1.0 - tint_w) + (detail * ftint) * tint_w
 
     sat_f = sat_rgb.astype(np.float32)
-    # Mix proportional to the per-pixel total opacity — pure satellite where
-    # we have nothing, blended where opacity > 0
-    mix_w = np.clip(total_op, 0.0, 1.0) * detail_blend
+    # Per-pixel mix amount. With per-class blends grass pixels barely show
+    # the satellite, while river / road pixels still pull colour from it.
+    mix_w = np.clip(total_op, 0.0, 1.0) * eff_blend
     out_rgb = sat_f * (1.0 - mix_w[..., None]) + detail * mix_w[..., None]
     out_rgb = np.clip(out_rgb, 0, 255).astype(np.uint8)
 
