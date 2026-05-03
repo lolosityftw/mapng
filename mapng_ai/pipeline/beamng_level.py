@@ -728,14 +728,20 @@ def write_level_package(
             build_vanilla_terrain_pack, class_to_internal_name,
         )
         classes_used = [l.cls.key for l in splat.layers]
-        vanilla_pack = build_vanilla_terrain_pack(level_name, classes_used)
+        # Source preference: Italy first (Mediterranean rural — fits NI
+        # better with 4 grass variants + weathered roads), fall back to
+        # Industrial inside the helper if Italy isn't installed.
+        vanilla_source = os.environ.get("MAPNG_TERRAIN_SOURCE", "italy")
+        vanilla_pack = build_vanilla_terrain_pack(
+            level_name, classes_used, side_m=side_m, source=vanilla_source,
+        )
         if vanilla_pack is not None:
             # Use the prefixed MapNG_<internalName> for each layer in the
             # .ter binary. Order matches splat.layers so layerMap indices
             # resolve correctly to material names.
             materials = []
             for l in splat.layers:
-                name = class_to_internal_name(level_name, l.cls.key)
+                name = class_to_internal_name(level_name, l.cls.key, vanilla_source)
                 materials.append(name or "MapNG_Grass3")  # last-resort fallback
             remap = np.zeros(256, dtype=np.uint8)
             for arr_idx, layer in enumerate(splat.layers):

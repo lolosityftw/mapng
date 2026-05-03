@@ -27,9 +27,22 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 
-# Land class → Industrial internalName. Picks the Industrial materials with
-# the best fit for our NI/Irish rural-village coverage. Industrial has full
-# PBR base+detail+macro layers for all of these.
+# Land class → vanilla internalName. We prefer Italy's terrain pack —
+# it's a Mediterranean countryside level with 4 grass variants, weathered
+# rural roads, dirt tracks, and forest_floor — much closer match to NI
+# rural villages than Industrial (which is a race-track / concrete yard).
+# Falls back to Industrial materials if Italy isn't installed.
+CLASS_TO_ITALY: Dict[str, str] = {
+    "asphalt":  "groundmodel_asphalt1",  # main rural roads
+    "concrete": "asphalt2",              # weathered/cracked asphalt — closest to NI village concrete
+    "lawn":     "Grass3",                # vivid managed lawn
+    "pasture":  "Grass2",                # rougher pasture green
+    "earth":    "dirt_loose",            # unpaved farm tracks
+    "gravel":   "RockyDirt",             # gravel/rocky tracks
+    "water":    "BeachSand",             # WaterPlane handles actual water
+    "forest":   "forest_floor",          # leaf litter / woodland
+}
+
 CLASS_TO_INDUSTRIAL: Dict[str, str] = {
     "asphalt":  "groundmodel_asphalt1",
     "concrete": "Concrete",
@@ -37,7 +50,7 @@ CLASS_TO_INDUSTRIAL: Dict[str, str] = {
     "pasture":  "Grass2",
     "earth":    "dirt",
     "gravel":   "Gravel",
-    "water":    "BeachSand",   # WaterPlane handles the actual water
+    "water":    "BeachSand",
     "forest":   "forest_floor",
 }
 
@@ -55,8 +68,8 @@ _TEX_FIELDS = (
 )
 
 
-def _candidate_industrial_paths() -> List[Path]:
-    """Common locations users have BeamNG.drive installed."""
+def _candidate_install_bases() -> List[Path]:
+    """Common BeamNG install locations."""
     drives = ["C:", "D:", "E:", "F:"]
     bases = [
         "/SteamLibrary/steamapps/common/BeamNG.drive",
@@ -67,16 +80,17 @@ def _candidate_industrial_paths() -> List[Path]:
     out: List[Path] = []
     for drv in drives:
         for base in bases:
-            out.append(Path(drv + base) / "content" / "levels" / "Industrial.zip")
+            out.append(Path(drv + base))
     return out
 
 
-def find_industrial_zip(override: Path | str | None = None) -> Path | None:
-    """Locate the user's Industrial.zip. Returns None if not found."""
+def find_level_zip(level_zip_name: str, override: Path | str | None = None) -> Path | None:
+    """Locate a vanilla level zip (e.g. 'italy.zip', 'Industrial.zip')."""
     if override is not None:
         p = Path(override)
         return p if p.is_file() else None
-    for p in _candidate_industrial_paths():
+    for base in _candidate_install_bases():
+        p = base / "content" / "levels" / level_zip_name
         try:
             if p.is_file():
                 return p
@@ -85,13 +99,21 @@ def find_industrial_zip(override: Path | str | None = None) -> Path | None:
     return None
 
 
-def find_terrain_assets_zip(industrial_zip: Path) -> Path | None:
-    """Locate the central terrain.zip relative to an Industrial.zip path.
+def find_industrial_zip(override: Path | str | None = None) -> Path | None:
+    return find_level_zip("Industrial.zip", override)
 
-    Industrial.zip is at .../content/levels/Industrial.zip
-    terrain.zip is at  .../content/assets/materials/terrain.zip
-    """
-    base = industrial_zip.parent.parent  # .../content
+
+def find_italy_zip(override: Path | str | None = None) -> Path | None:
+    # Italy is named lowercase in some installs
+    p = find_level_zip("italy.zip", override)
+    if p is not None:
+        return p
+    return find_level_zip("Italy.zip", override)
+
+
+def find_terrain_assets_zip(level_zip: Path) -> Path | None:
+    """Locate the central terrain.zip relative to a level zip path."""
+    base = level_zip.parent.parent  # .../content
     p = base / "assets" / "materials" / "terrain.zip"
     return p if p.is_file() else None
 
@@ -170,26 +192,42 @@ def build_vanilla_terrain_pack(
     classes_used: List[str],
     industrial_zip: Path | None = None,
     side_m: float = 1024.0,
+    source: str = "italy",  # "italy" or "industrial" — Italy is rural Mediterranean countryside (best fit for NI villages)
 ) -> Tuple[Dict[str, dict], List[Tuple[str, bytes]]] | None:
     """Build a vanilla terrain material pack for the given list of class keys.
 
-    Bundles ALL texture files into our mod (both Industrial-local PNGs and
-    redirected /assets/... PNGs from terrain.zip). Empirically the redirect
-    paths don't resolve from a mod context, so we copy everything in.
+    Bundles all texture files into our mod (both level-local PNGs and
+    redirected /assets/... PNGs from terrain.zip).
 
-    side_m: terrain side length in metres. Used to scale `diffuseSize` so
-    the base color texture wraps once across the whole map instead of the
-    Industrial default (1024m/wrap) which tiles visibly on larger maps.
-    detailSize (2m) and macroSize (80m) are kept small — they tile so
-    frequently they read as noise rather than visible repetition.
+    source: which vanilla level to clone materials from. Italy is the
+    default — its 4 grass variants and weathered rural roads match NI
+    countryside much better than Industrial's race-track materials.
     """
-    industrial_zip = industrial_zip or find_industrial_zip()
-    if industrial_zip is None:
+    # Pick source level
+    if source == "italy":
+        src_zip = find_italy_zip()
+        members = ("levels/italy/art/terrains/main.materials.json",
+                   "levels/Italy/art/terrains/main.materials.json")
+        class_map = CLASS_TO_ITALY
+    else:
+        src_zip = industrial_zip or find_industrial_zip()
+        members = ("levels/Industrial/art/terrains/main.materials.json",
+                   "levels/industrial/art/terrains/main.materials.json")
+        class_map = CLASS_TO_INDUSTRIAL
+
+    # Italy fallback to Industrial if Italy not installed
+    if src_zip is None and source == "italy":
+        src_zip = find_industrial_zip()
+        members = ("levels/Industrial/art/terrains/main.materials.json",
+                   "levels/industrial/art/terrains/main.materials.json")
+        class_map = CLASS_TO_INDUSTRIAL
+
+    if src_zip is None:
         return None
-    terrain_zip = find_terrain_assets_zip(industrial_zip)
+    terrain_zip = find_terrain_assets_zip(src_zip)
 
     try:
-        izf = zipfile.ZipFile(industrial_zip, "r")
+        izf = zipfile.ZipFile(src_zip, "r")
     except (zipfile.BadZipFile, OSError):
         return None
     tzf = None
@@ -200,18 +238,21 @@ def build_vanilla_terrain_pack(
             tzf = None
 
     try:
-        try:
-            mats_raw = json.loads(izf.read(
-                "levels/Industrial/art/terrains/main.materials.json"
-            ))
-        except KeyError:
+        mats_raw = None
+        for member_path in members:
+            try:
+                mats_raw = json.loads(izf.read(member_path))
+                break
+            except KeyError:
+                continue
+        if mats_raw is None:
             return None
 
         redirects = _build_redirect_map(izf)
 
         wanted_internal: Dict[str, str] = {}
         for cls_key in classes_used:
-            iname = CLASS_TO_INDUSTRIAL.get(cls_key)
+            iname = class_map.get(cls_key)
             if iname:
                 wanted_internal[cls_key] = iname
 
@@ -322,10 +363,14 @@ def texture_set_name(level_name: str) -> str:
     return f"MapNG_terrainTextureSet_{level_name}"
 
 
-def class_to_internal_name(level_name: str, cls_key: str) -> str | None:
+def class_to_internal_name(level_name: str, cls_key: str, source: str = "italy") -> str | None:
     """Return the prefixed internalName our vanilla pack uses for this class.
 
     Used by the .ter writer to put the right material name in the binary.
+    Must match the source the pack was built from.
     """
-    iname = CLASS_TO_INDUSTRIAL.get(cls_key)
+    if source == "italy":
+        iname = CLASS_TO_ITALY.get(cls_key) or CLASS_TO_INDUSTRIAL.get(cls_key)
+    else:
+        iname = CLASS_TO_INDUSTRIAL.get(cls_key)
     return f"MapNG_{iname}" if iname else None
