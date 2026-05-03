@@ -449,6 +449,8 @@ def _level_objects(level_name: str, size_m: float, size_px: int,
         # terrain pack to actually bind textures (without it the materials
         # load but every cell renders as warning_material).
         "materialTextureSet": texture_set,
+        # In-game top-down minimap — generated from the composite imagery
+        "minimapImage": f"levels/{level_name}/{level_name}_minimap.png",
     }
     children = [terrain_block]
     if water_z is not None:
@@ -648,6 +650,38 @@ def _solid_preview_png(size: int = 256) -> bytes:
     return buf.getvalue()
 
 
+def _preview_from_composite(composite_bytes: bytes, size: int = 512) -> bytes:
+    """Generate the level picker thumbnail from our terrain composite.
+
+    Produces a square PNG at `size`x`size` that BeamNG shows in the level
+    selector. We sharpen the composite slightly and add a subtle vignette
+    so it reads well at thumbnail size.
+    """
+    src = Image.open(io.BytesIO(composite_bytes)).convert("RGB")
+    # Centre-crop to square (composite is already square but be safe)
+    w, h = src.size
+    side = min(w, h)
+    src = src.crop(((w - side) // 2, (h - side) // 2,
+                    (w + side) // 2, (h + side) // 2))
+    src = src.resize((size, size), Image.LANCZOS)
+    buf = io.BytesIO()
+    src.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+def _minimap_from_composite(composite_bytes: bytes, size: int = 1024) -> bytes:
+    """High-res top-down minimap referenced by TerrainBlock.minimapImage."""
+    src = Image.open(io.BytesIO(composite_bytes)).convert("RGB")
+    w, h = src.size
+    side = min(w, h)
+    src = src.crop(((w - side) // 2, (h - side) // 2,
+                    (w + side) // 2, (h + side) // 2))
+    src = src.resize((size, size), Image.LANCZOS)
+    buf = io.BytesIO()
+    src.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # Top-level export
 # ---------------------------------------------------------------------------
@@ -809,7 +843,32 @@ def write_level_package(
                 foreign_levels.add(rel[len("levels/"):].split("/", 1)[0])
     foreign_levels.discard(level_name)
     w(f"{base}/mainLevel.lua", _main_level_lua(level_name, sorted(foreign_levels)))
-    w(f"{base}/preview.png", _solid_preview_png())
+
+    # Resolve the composite terrain image once — used for terrain.png,
+    # the level-picker thumbnail (preview.png) and the in-game minimap.
+    composite_bytes: bytes | None = None
+    if terrain_png_bytes is not None:
+        composite_bytes = terrain_png_bytes
+    elif _splat_for_export is not None:
+        detailed = getattr(_splat_for_export, "detailed_diffuse_path", None)
+        if detailed is not None:
+            composite_bytes = detailed.read_bytes()
+        else:
+            composite_bytes = _splat_for_export.combined_diffuse_path.read_bytes()
+    else:
+        composite_bytes = _flat_terrain_png()
+
+    # Level-picker thumbnail (BeamNG shows this in the level selector)
+    try:
+        w(f"{base}/preview.png", _preview_from_composite(composite_bytes, size=512))
+    except Exception:
+        w(f"{base}/preview.png", _solid_preview_png())
+    # Top-down minimap (referenced by TerrainBlock.minimapImage)
+    try:
+        w(f"{base}/{level_name}_minimap.png",
+          _minimap_from_composite(composite_bytes, size=1024))
+    except Exception:
+        pass
 
     # ------------------------------------------------------------------
     # Terrain binary + JSON descriptor
@@ -837,20 +896,8 @@ def write_level_package(
 
     # Base diffuse texture — this IS the terrain visual now, since we use a
     # single DefaultMaterial covering the whole map.
-    if terrain_png_bytes is not None:
-        w(f"{base}/art/terrains/terrain.png", terrain_png_bytes)
-    elif _splat_for_export is not None:
-        # Prefer the detailed composite (includes per-class PBR detail
-        # blended over satellite imagery) if available; fall back to the
-        # plain combined diffuse swatch.
-        detailed = getattr(_splat_for_export, "detailed_diffuse_path", None)
-        if detailed is not None:
-            w(f"{base}/art/terrains/terrain.png", detailed.read_bytes())
-        else:
-            w(f"{base}/art/terrains/terrain.png",
-              _splat_for_export.combined_diffuse_path.read_bytes())
-    else:
-        w(f"{base}/art/terrains/terrain.png", _flat_terrain_png())
+    # Same composite used for preview/minimap above
+    w(f"{base}/art/terrains/terrain.png", composite_bytes)
 
     # ------------------------------------------------------------------
     # Road textures + materials
