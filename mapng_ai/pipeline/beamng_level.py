@@ -436,10 +436,9 @@ def _level_objects(level_name: str, size_m: float, size_px: int,
     terrain_block = {
         "class": "TerrainBlock",
         "name": "theTerrain",
-        # path WITHOUT leading slash — matches the working format from
-        # commit 31620c1 ("Fix BeamNG export: correct terrain scale + missing
-        # textures"). Adding a leading slash breaks material resolution.
-        "terrainFile": f"levels/{level_name}/theTerrain.ter",
+        # LEADING SLASH on terrainFile — verified against vanilla
+        # small_island and Industrial; both use "/levels/X/foo.ter" format
+        "terrainFile": f"/levels/{level_name}/theTerrain.ter",
         # SW corner: terrain extends from here by size_px * squareSize in X and Y
         "position": [-half, -half, terrain_min_m],
         # squareSize = metres per heightmap pixel — critical for correct world scale
