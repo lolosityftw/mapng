@@ -133,8 +133,11 @@ def _terrain_json(level_name: str, size_px: int, side_m: float, materials: list[
         "version": 9,
         "size": size_px,
         "squareSize": square_size,
-        "datafile": f"levels/{level_name}/theTerrain.ter",
-        "heightmapImage": f"levels/{level_name}/theTerrain.terrainheightmap.png",
+        # LEADING SLASH required — vanilla BeamNG (GridMap/Cliff/Industrial)
+        # all use absolute VFS paths here. Without it, BeamNG's TerrainBlock
+        # silently fails to bind material textures.
+        "datafile": f"/levels/{level_name}/theTerrain.ter",
+        "heightmapImage": f"/levels/{level_name}/theTerrain.terrainheightmap.png",
         "heightMapSize": size_px * size_px,
         "heightMapItemSize": 2,
         "layerMapSize": size_px * size_px,
@@ -171,17 +174,23 @@ def _terrain_materials_json(level_name: str, side_m: float,
         "forest":   "GRASS",
     }
 
+    # Format verified against vanilla BeamNG GridMap/Cliff/Industrial:
+    # - Dict key: "{InternalName}-{UUID}" (UUID prevents collision across mods)
+    # - Required fields: internalName, class, persistentId
+    # - NO name/mapTo fields (those are Material-class only, not TerrainMaterial)
+    # - Texture paths use LEADING SLASH (/levels/X/art/...)
+    # - groundmodelName: plain "ASPHALT"/"GRASS"/"DIRT"/"GRAVEL" (no prefix)
+    def _pid(seed: str) -> str:
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"mapng:terrain:{level_name}:{seed}"))
+
     if splat is None:
-        # Single full-map terrain texture. Name MUST be unique — using
-        # "DefaultMaterial" causes a name clash with BeamNG's built-in,
-        # which silently shadows our material with the warning checker.
+        pid = _pid("MapNG_Terrain")
         return {
-            "MapNG_Terrain": {
-                "name": "MapNG_Terrain",
-                "mapTo": "MapNG_Terrain",
-                "class": "TerrainMaterial",
+            f"MapNG_Terrain-{pid}": {
                 "internalName": "MapNG_Terrain",
-                "diffuseMap": f"levels/{level_name}/art/terrains/terrain.png",
+                "class": "TerrainMaterial",
+                "persistentId": pid,
+                "diffuseMap": f"/levels/{level_name}/art/terrains/terrain.png",
                 "diffuseSize": int(side_m),
                 "groundmodelName": "ASPHALT",
             },
@@ -191,23 +200,24 @@ def _terrain_materials_json(level_name: str, side_m: float,
     for layer in splat.layers:
         key = layer.cls.key
         ext = layer.diffuse_path.suffix.lower()
+        internal = f"mat_{key}"
+        pid = _pid(internal)
         mat: dict = {
-            "name": f"mat_{key}",
-            "mapTo": f"mat_{key}",
+            "internalName": internal,
             "class": "TerrainMaterial",
-            "internalName": f"mat_{key}",
-            "diffuseMap": f"levels/{level_name}/art/terrains/diffuse_{key}{ext}",
+            "persistentId": pid,
+            "diffuseMap": f"/levels/{level_name}/art/terrains/diffuse_{key}{ext}",
             "diffuseSize": 4,
             "groundmodelName": _GROUNDMODELS.get(key, "GRASS"),
         }
         if layer.normal_path is not None:
             ne = layer.normal_path.suffix.lower()
-            mat["normalMap"] = f"levels/{level_name}/art/terrains/normal_{key}{ne}"
+            mat["normalMap"] = f"/levels/{level_name}/art/terrains/normal_{key}{ne}"
         if layer.roughness_path is not None:
             re_ = layer.roughness_path.suffix.lower()
-            mat["specularMap"] = f"levels/{level_name}/art/terrains/rough_{key}{re_}"
+            mat["specularMap"] = f"/levels/{level_name}/art/terrains/rough_{key}{re_}"
             mat["specularPower"] = 16
-        out[f"mat_{key}"] = mat
+        out[f"{internal}-{pid}"] = mat
     return out
 
 
