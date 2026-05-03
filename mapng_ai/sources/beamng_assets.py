@@ -33,6 +33,63 @@ _DEFAULT_LEVELS = (
 )
 
 
+# Curated whitelist of Italy assets safe for placement on a generated map.
+# The auto-scanner picked up 227 items including billboards, bridges, dams,
+# bus stops, etc. — all in /buildings/ folders — and stretched them to
+# residential footprints. This whitelist is the residential / village
+# subset only, with manually-estimated natural sizes (length × width × height
+# in metres) so the placement scaler produces reasonable buildings.
+#
+# Sizes are estimated from visual inspection + filename hints (e.g.
+# `italy_bld_20x12_apartment` is 20m × 12m). They're approximate but
+# within ~2× of reality, which is enough for sane placement scaling.
+
+# (relpath, type, length_m, width_m, height_m)
+_ITALY_BUILDINGS: tuple[tuple[str, str, float, float, float], ...] = (
+    # 16 town/village houses — small to large
+    ("/levels/italy/art/shapes/buildings/italy_town_bld1.dae",  "residential",  8,  7,  8),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld2.dae",  "residential", 10,  8,  9),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld3.dae",  "residential", 12, 10, 10),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld4.dae",  "residential", 10,  8,  8),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld5.dae",  "residential", 12, 10, 10),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld6.dae",  "shop",        12, 10, 10),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld7.dae",  "shop",        14, 11, 11),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld8.dae",  "shop",        12, 10, 10),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld9.dae",  "residential", 14, 12, 12),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld10.dae", "shop",        16, 13, 13),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld11.dae", "residential", 18, 14, 14),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld12.dae", "shop",        20, 16, 16),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld13.dae", "apartment",   20, 16, 18),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld14.dae", "apartment",   22, 18, 20),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld15.dae", "apartment",   24, 20, 22),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld16.dae", "apartment",   30, 25, 25),
+    # Apartment — explicit dimensions in filename
+    ("/levels/italy/art/shapes/buildings/italy_bld_20x12_apartment.dae", "apartment", 20, 12, 15),
+    # Churches
+    ("/levels/italy/art/shapes/buildings/italy_bld_small_church.dae",   "civic", 12,  8, 15),
+    ("/levels/italy/art/shapes/buildings/italy_bld_church_village.dae", "civic", 18, 12, 20),
+    # Mansions / villas
+    ("/levels/italy/art/shapes/buildings/italy_village_palazzo.dae",     "residential", 20, 15, 15),
+    ("/levels/italy/art/shapes/buildings/italy_bld_hilltop_mansion.dae", "residential", 18, 14, 12),
+)
+
+# (relpath, type, length_m, width_m, height_m)
+_ITALY_TREES: tuple[tuple[str, str, float, float, float], ...] = (
+    ("/levels/italy/art/shapes/trees/trees_italy/holm_oak.dae",           "oak",    8,  8, 10),
+    ("/levels/italy/art/shapes/trees/trees_italy/holm_oak_city_small.dae", "oak",   5,  5,  6),
+    ("/levels/italy/art/shapes/trees/trees_italy/holm_oak_city_tall.dae",  "oak",   8,  8, 12),
+    ("/levels/italy/art/shapes/trees/trees_italy/cypress_tree.dae",        "cypress", 3,  3, 12),
+    ("/levels/italy/art/shapes/trees/trees_italy/maritime_pine.dae",       "pine",  10, 10, 18),
+    ("/levels/italy/art/shapes/trees/trees_italy/maritime_pine_2.dae",     "pine",   8,  8, 14),
+    ("/levels/italy/art/shapes/trees/trees_italy/scots_pine.dae",          "pine",   6,  6, 12),
+    ("/levels/italy/art/shapes/trees/trees_italy/olive.dae",               "olive",  6,  6,  6),
+    ("/levels/italy/art/shapes/trees/trees_italy/cork_oak_medium.dae",     "oak",    7,  7,  9),
+    ("/levels/italy/art/shapes/trees/trees_italy/cork_oak_large_1.dae",    "oak",   10, 10, 12),
+    ("/levels/italy/art/shapes/trees/trees_italy/generibush.dae",          "bush",   2,  2, 1.5),
+    ("/levels/italy/art/shapes/trees/trees_italy/fluffy_bush.dae",         "bush",   2,  2, 1.5),
+)
+
+
 @dataclass(frozen=True)
 class BeamNGAsset:
     level: str                         # source level dir name
@@ -180,27 +237,39 @@ def _scan_zipped(content_levels: Path, targets: set[str]) -> list[BeamNGAsset]:
 
 
 def scan(levels: tuple[str, ...] | None = None) -> list[BeamNGAsset]:
-    """Walk MAPNG_BEAMNG_PATH and return every TSStatic-friendly shape we
-    can reference. If `levels` is None scan a curated default list to
-    avoid the very-large pack levels."""
+    """Return curated Italy assets with hand-tuned natural sizes.
+
+    The previous "scan everything in /buildings/" approach pulled in
+    billboards, bridges, dams, fire stations, etc. — all of which got
+    scaled to OSM residential footprints and produced absurd 100×-too-big
+    structures. Now we ONLY emit assets from the curated whitelist with
+    manually-specified natural sizes, so the placement scaler's
+    `scale = footprint / natural_size` math produces sane results.
+    """
     install = _install_path()
     if install is None:
         return []
-    targets = set(levels or _DEFAULT_LEVELS)
 
+    # Italy zip exists check
+    italy_zip = install / "content" / "levels" / "italy.zip"
+    italy_extracted = install / "levels" / "italy"
+    if not italy_zip.is_file() and not italy_extracted.is_dir():
+        return []
+
+    fs_anchor = italy_zip if italy_zip.is_file() else italy_extracted
     out: list[BeamNGAsset] = []
-    # Extracted levels (older installs / mods)
-    if (install / "levels").exists():
-        out.extend(_scan_extracted(install / "levels", targets))
-    # Versioned userdata layout: <install>/<version>/levels/...
-    try:
-        for sub in install.iterdir():
-            if sub.is_dir() and (sub / "levels").exists():
-                out.extend(_scan_extracted(sub / "levels", targets))
-    except OSError:
-        pass
-    # Shipping zipped layout (the default for Steam installs)
-    out.extend(_scan_zipped(install / "content" / "levels", targets))
+    for relpath, btype, l, w, h in _ITALY_BUILDINGS:
+        out.append(BeamNGAsset(
+            level="italy", relpath=relpath, fs_path=fs_anchor,
+            category="building", type=btype,
+            natural_size_m=(float(l), float(w), float(h)),
+        ))
+    for relpath, ttype, l, w, h in _ITALY_TREES:
+        out.append(BeamNGAsset(
+            level="italy", relpath=relpath, fs_path=fs_anchor,
+            category="tree", type=ttype,
+            natural_size_m=(float(l), float(w), float(h)),
+        ))
     return out
 
 

@@ -484,14 +484,13 @@ async def stage_export(ctx: JobContext, emit: Emit) -> None:
     elif ctx.imagery is not None:
         terrain_png = ctx.imagery.sat_png_path.read_bytes()
 
-    # BeamNG asset reference mode — OFF by default. The asset scanner picks
-    # up EVERYTHING in /buildings/ folders including billboards, bridges,
-    # bus stops, etc. — which then get scaled to fit residential footprints
-    # and look ridiculous. Until we have a proper whitelist of safe
-    # residential/village buildings + per-asset bounding-box reads,
-    # placeholder COLLADA is the safer default.
+    # BeamNG asset reference mode — ON by default. Uses the curated
+    # Italy whitelist in beamng_assets.py (21 village buildings + 12 trees,
+    # all with hand-tuned natural sizes). The whitelist is the safety net
+    # the previous auto-scan-everything approach lacked. Set
+    # MAPNG_BEAMNG_REFS=0 for placeholder COLLADA only.
     import os as _os
-    refs_enabled = _os.environ.get("MAPNG_BEAMNG_REFS", "0") == "1"
+    refs_enabled = _os.environ.get("MAPNG_BEAMNG_REFS", "1") == "1"
     export_buildings = ctx.buildings
     export_foliage = ctx.foliage
     beamng_subs = 0
