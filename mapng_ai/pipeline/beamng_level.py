@@ -426,7 +426,8 @@ def _decal_roads_objects(roads: Sequence[DecalRoad]) -> list[dict]:
 
 def _level_objects(level_name: str, size_m: float, size_px: int,
                    terrain_min_m: float, terrain_max_m: float,
-                   water_z: float | None = None) -> list[dict]:
+                   water_z: float | None = None,
+                   texture_set: str = "") -> list[dict]:
     half = size_m / 2
     square_size = size_m / size_px
     # maxHeight = full height range so BeamNG maps uint16 → world-space metres correctly.
@@ -445,6 +446,11 @@ def _level_objects(level_name: str, size_m: float, size_px: int,
         "squareSize": square_size,
         "maxHeight": max_height,
         "castShadows": True,
+        # PBR atlas binding — references TerrainMaterialTextureSet defined
+        # in art/terrains/main.materials.json. Required for the vanilla
+        # terrain pack to actually bind textures (without it the materials
+        # load but every cell renders as warning_material).
+        "materialTextureSet": texture_set,
     }
     children = [terrain_block]
     if water_z is not None:
@@ -537,6 +543,7 @@ def _mission_group(
     foliage: FoliageResult | None,
     roads: Sequence[DecalRoad],
     water_z: float | None = None,
+    texture_set: str = "",
 ) -> dict:
     sx, sy, sz = spawn_xyz
     children = [
@@ -549,7 +556,8 @@ def _mission_group(
             "class": "SimGroup",
             "name": "Level_objects",
             "childs": _level_objects(level_name, size_m, size_px,
-                                     terrain_min_m, terrain_max_m, water_z=water_z),
+                                     terrain_min_m, terrain_max_m,
+                                     water_z=water_z, texture_set=texture_set),
         },
     ]
     if buildings:
@@ -907,9 +915,16 @@ def write_level_package(
     # ------------------------------------------------------------------
     # Scene graph (NDJSON items.level.json files)
     # ------------------------------------------------------------------
+    # If we used the vanilla terrain pack, the TerrainBlock needs to
+    # reference its TerrainMaterialTextureSet by name.
+    texture_set = ""
+    if vanilla_pack is not None:
+        from mapng_ai.pipeline.beamng_vanilla_terrain import texture_set_name
+        texture_set = texture_set_name(level_name)
     scene_root = _mission_group(
         level_name, side_m, size_px, t_min, t_max, spawn_xyz,
         buildings, foliage, decal_roads, water_z=water_z,
+        texture_set=texture_set,
     )
     _emit_ndjson_tree(scene_root, f"{base}/main", w)
 

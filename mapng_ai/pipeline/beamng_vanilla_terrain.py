@@ -218,6 +218,33 @@ def build_vanilla_terrain_pack(
         bundle_files: Dict[str, bytes] = {}
         our_terrain_dir = f"/levels/{level_name}/art/terrains"
 
+        # ---- TerrainMaterialTextureSet ----
+        # PBR TerrainMaterials REQUIRE a companion TerrainMaterialTextureSet
+        # object that defines the base/detail/macro atlas sizes. Without it
+        # BeamNG silently fails to bind textures even though the material
+        # itself loads — you get "Material X is missing texture" forever.
+        # We clone Industrial's textureSet, give it a unique name + UUID,
+        # and reference it from the TerrainBlock via materialTextureSet.
+        ts_pid = str(uuid.uuid5(
+            uuid.NAMESPACE_URL, f"mapng:terrain_textureset:{level_name}"
+        ))
+        ts_name = f"MapNG_terrainTextureSet_{level_name}"
+        # Pull from Industrial's textureSet if present, else use 1024 defaults
+        ts_template = None
+        for k, v in mats_raw.items():
+            if v.get("class") == "TerrainMaterialTextureSet":
+                ts_template = v
+                break
+        texture_set = {
+            "name": ts_name,
+            "class": "TerrainMaterialTextureSet",
+            "persistentId": ts_pid,
+            "baseTexSize":   ts_template["baseTexSize"]   if ts_template else [1024, 1024],
+            "detailTexSize": ts_template["detailTexSize"] if ts_template else [1024, 1024],
+            "macroTexSize":  ts_template["macroTexSize"]  if ts_template else [1024, 1024],
+        }
+        out_materials[ts_name] = texture_set
+
         for cls_key, iname in wanted_internal.items():
             tmpl = by_internal.get(iname)
             if tmpl is None:
@@ -255,6 +282,12 @@ def build_vanilla_terrain_pack(
         izf.close()
         if tzf is not None:
             tzf.close()
+
+
+def texture_set_name(level_name: str) -> str:
+    """Return the TerrainMaterialTextureSet name for this level (used by
+    the TerrainBlock's materialTextureSet field)."""
+    return f"MapNG_terrainTextureSet_{level_name}"
 
 
 def class_to_internal_name(level_name: str, cls_key: str) -> str | None:
