@@ -56,20 +56,24 @@ def _hex_to_float3(h: str) -> list[float]:
 def _shape_materials_json(level_name: str) -> dict:
     """BeamNG Material definitions for every MapNG_* name referenced in DAEs.
 
-    Uses the proven old-style Torque3D Material format with `diffuseColor`
-    inside Stages — no texture map needed for solid colours. This is the
-    same format the nikkiluzader/mapng reference implementation uses.
+    Uses the same baseColorMap/baseColorFactor 4-stage format as road
+    materials (proven working in commit 31620c1). The 1×1 white PNG at
+    art/white.png lets baseColorFactor multiply against a known texture.
     """
+    white = f"levels/{level_name}/art/white.png"
+
     def _mat(name: str, hex_color: str) -> dict:
         r, g, b = _hex_to_float3(hex_color)
         return {
-            "name": name,
             "mapTo": name,
             "class": "Material",
-            "Stages": [{
-                "diffuseColor": [r, g, b, 1.0],
-            }],
-            "translucentBlendOp": "None",
+            "Stages": [
+                {
+                    "baseColorMap": white,
+                    "baseColorFactor": [r, g, b, 1.0],
+                },
+                {}, {}, {},
+            ],
         }
 
     mats: dict = {}
@@ -87,6 +91,12 @@ def _shape_materials_json(level_name: str) -> dict:
     mats["MapNG_tree_trunk"]  = _mat("MapNG_tree_trunk",  "#5D4037")
     mats["MapNG_tree_canopy"] = _mat("MapNG_tree_canopy", "#2E7D32")
     return mats
+
+
+def _white_png_1x1() -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGBA", (1, 1), (255, 255, 255, 255)).save(buf, format="PNG")
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -122,8 +132,8 @@ def _terrain_json(level_name: str, size_px: int, side_m: float, materials: list[
         "version": 9,
         "size": size_px,
         "squareSize": square_size,
-        "datafile": f"/levels/{level_name}/theTerrain.ter",
-        "heightmapImage": f"/levels/{level_name}/theTerrain.terrainheightmap.png",
+        "datafile": f"levels/{level_name}/theTerrain.ter",
+        "heightmapImage": f"levels/{level_name}/theTerrain.terrainheightmap.png",
         "heightMapSize": size_px * size_px,
         "heightMapItemSize": 2,
         "layerMapSize": size_px * size_px,
@@ -150,24 +160,25 @@ def _terrain_materials_json(level_name: str, side_m: float,
       - diffuseSize is the world-space tile size in meters (4 m = fine detail).
     """
     _GROUNDMODELS = {
-        "asphalt":  "GROUNDMODEL_ASPHALT1",
-        "concrete": "GROUNDMODEL_ASPHALT1",
-        "lawn":     "GROUNDMODEL_GRASS",
-        "pasture":  "GROUNDMODEL_GRASS",
-        "earth":    "GROUNDMODEL_DIRT",
-        "gravel":   "GROUNDMODEL_GRAVEL",
-        "water":    "GROUNDMODEL_ASPHALT1",
-        "forest":   "GROUNDMODEL_GRASS",
+        "asphalt":  "ASPHALT",
+        "concrete": "ASPHALT",
+        "lawn":     "GRASS",
+        "pasture":  "GRASS",
+        "earth":    "DIRT",
+        "gravel":   "GRAVEL",
+        "water":    "ASPHALT",
+        "forest":   "GRASS",
     }
 
     if splat is None:
         return {
             "DefaultMaterial": {
+                "mapTo": "DefaultMaterial",
                 "class": "TerrainMaterial",
                 "internalName": "DefaultMaterial",
                 "diffuseMap": f"levels/{level_name}/art/terrains/terrain.png",
                 "diffuseSize": int(side_m),
-                "groundmodelName": "GROUNDMODEL_ASPHALT1",
+                "groundmodelName": "ASPHALT",
             },
         }
 
@@ -175,13 +186,13 @@ def _terrain_materials_json(level_name: str, side_m: float,
     for layer in splat.layers:
         key = layer.cls.key
         ext = layer.diffuse_path.suffix.lower()
-        name = f"mat_{key}"
         mat: dict = {
+            "mapTo": f"mat_{key}",
             "class": "TerrainMaterial",
-            "internalName": name,
+            "internalName": f"mat_{key}",
             "diffuseMap": f"levels/{level_name}/art/terrains/diffuse_{key}{ext}",
             "diffuseSize": 4,
-            "groundmodelName": _GROUNDMODELS.get(key, "GROUNDMODEL_GRASS"),
+            "groundmodelName": _GROUNDMODELS.get(key, "GRASS"),
         }
         if layer.normal_path is not None:
             ne = layer.normal_path.suffix.lower()
@@ -190,7 +201,7 @@ def _terrain_materials_json(level_name: str, side_m: float,
             re_ = layer.roughness_path.suffix.lower()
             mat["specularMap"] = f"levels/{level_name}/art/terrains/rough_{key}{re_}"
             mat["specularPower"] = 16
-        out[name] = mat
+        out[f"mat_{key}"] = mat
     return out
 
 
@@ -251,16 +262,18 @@ def _main_level_lua(level_name: str, foreign_levels: list[str]) -> str:
 def _road_materials_json(level_name: str) -> dict:
     def _mat(name: str, tex_path: str) -> dict:
         return {
-            "name": name,
             "mapTo": name,
             "class": "Material",
             "translucent": True,
             "translucentBlendOp": "PreMulAlpha",
             "alphaRef": 0,
-            "Stages": [{
-                "diffuseMap": tex_path,
-                "diffuseColor": [1.0, 1.0, 1.0, 1.0],
-            }],
+            "Stages": [
+                {
+                    "baseColorMap": tex_path,
+                    "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
+                },
+                {}, {}, {},
+            ],
         }
 
     return {
@@ -409,16 +422,15 @@ def _level_objects(level_name: str, size_m: float, size_px: int,
     terrain_block = {
         "class": "TerrainBlock",
         "name": "theTerrain",
-        # terrainFile uses LEADING SLASH (BeamNG vanilla convention)
-        "terrainFile": f"/levels/{level_name}/theTerrain.ter",
+        # path WITHOUT leading slash — matches the working format from
+        # commit 31620c1 ("Fix BeamNG export: correct terrain scale + missing
+        # textures"). Adding a leading slash breaks material resolution.
+        "terrainFile": f"levels/{level_name}/theTerrain.ter",
         # SW corner: terrain extends from here by size_px * squareSize in X and Y
         "position": [-half, -half, terrain_min_m],
         # squareSize = metres per heightmap pixel — critical for correct world scale
         "squareSize": square_size,
         "maxHeight": max_height,
-        "baseTexSize": size_px,
-        "materialTextureSet": "",
-        "minimapImage": "",
         "castShadows": True,
     }
     children = [terrain_block]
@@ -800,10 +812,10 @@ def write_level_package(
           json.dumps(_road_materials_json(level_name), indent=2))
 
     # ------------------------------------------------------------------
-    # Shape / foliage materials — defines every MapNG_* name referenced in
-    # the COLLADA DAEs as a solid-colour BeamNG Material. Auto-discovered
-    # from art/shapes/ before TSStatics are placed.
+    # Shape / foliage materials + 1×1 white texture used as baseColorMap
+    # for solid-colour Materials (multiplied by per-material baseColorFactor).
     # ------------------------------------------------------------------
+    w(f"{base}/art/white.png", _white_png_1x1())
     w(f"{base}/art/shapes/main.materials.json",
       json.dumps(_shape_materials_json(level_name), indent=2))
 
