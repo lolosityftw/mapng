@@ -226,21 +226,39 @@ def _terrain_materials_json(level_name: str, side_m: float,
 # ---------------------------------------------------------------------------
 
 def _main_level_lua(level_name: str, foreign_levels: list[str]) -> str:
-    """Level script. BeamNG does NOT auto-discover *.materials.json from mod
-    zips for level mods, so we have to load them explicitly. We do this at
-    module-load (top-level code) which runs during the level's resource
-    setup phase — before TerrainBlock and DecalRoad are instantiated.
-    Confirmed empirically: terrain init at +0.4s vs material loading at
-    +0.2s into level load.
+    """Level script. Loads our own materials AND vanilla BeamNG terrain
+    materials (from Industrial/GridMap) so we can reference high-quality
+    PBR ground textures by their internalName in our .ter binary.
+
+    Loading happens at module-load time (top-level code) which runs during
+    the level's resource setup phase — before TerrainBlock and DecalRoad
+    are instantiated. Confirmed empirically: terrain init happens ~0.2s
+    after the Lua module loads.
     """
     foreign_lua = "{}" if not foreign_levels else (
         "{\n" + "\n".join(f"  '{name}'," for name in foreign_levels) + "\n}"
     )
+    # Vanilla terrain material pools — loaded so we can reference their
+    # internalNames (Grass, Concrete, Rock, etc.) in our .ter binary.
+    # Industrial has the highest-quality PBR set (17 materials with full
+    # base/detail/macro layers + AO + height + roughness).
+    vanilla_pools = [
+        "/levels/industrial/art/terrains/main.materials.json",
+        "/levels/east_coast_usa/art/terrains/main.materials.json",
+        "/levels/west_coast_usa/art/terrains/main.materials.json",
+        "/levels/utah/art/terrains/main.materials.json",
+        "/levels/italy/art/terrains/main.materials.json",
+        "/levels/small_island/art/terrains/main.materials.json",
+        "/levels/Cliff/art/terrain/main.materials.json",
+        "/levels/GridMap/art/terrain/main.materials.json",
+    ]
+    pools_lua = "{\n" + "\n".join(f"  '{p}'," for p in vanilla_pools) + "\n}"
     return (
         "-- MapNG-AI generated level\n"
         "local M = {}\n"
         "\n"
         f"local foreignLevels = {foreign_lua}\n"
+        f"local vanillaTerrainPools = {pools_lua}\n"
         "\n"
         "local function loadMaterialsFromDir(dir)\n"
         "  local files = FS:findFiles(dir, '*.materials.json', -1, true, false)\n"
@@ -250,14 +268,23 @@ def _main_level_lua(level_name: str, foreign_levels: list[str]) -> str:
         "  end\n"
         "end\n"
         "\n"
-        "-- Module-load: register materials so the terrain/road/TSStatic\n"
-        "-- objects can resolve them when the scene is built.\n"
+        "local function loadVanillaTerrainMaterials()\n"
+        "  for _, path in ipairs(vanillaTerrainPools) do\n"
+        "    if FS and FS.fileExists and FS:fileExists(path) then\n"
+        "      loadJsonMaterialsFile(path)\n"
+        "    end\n"
+        "  end\n"
+        "end\n"
+        "\n"
+        "-- Module-load: register materials BEFORE scene objects instantiate.\n"
+        "loadVanillaTerrainMaterials()\n"
         f"loadMaterialsFromDir('/levels/{level_name}/art/')\n"
         "for _, name in ipairs(foreignLevels) do\n"
         "  loadMaterialsFromDir('/levels/' .. name .. '/art/')\n"
         "end\n"
         "\n"
         "function M.onClientStartMission()\n"
+        "  loadVanillaTerrainMaterials()\n"
         f"  loadMaterialsFromDir('/levels/{level_name}/art/')\n"
         "  for _, name in ipairs(foreignLevels) do\n"
         "    loadMaterialsFromDir('/levels/' .. name .. '/art/')\n"
@@ -712,16 +739,46 @@ def write_level_package(
         from dataclasses import replace as _r2
         foliage = _r2(foliage, trees=normalized_trees)
 
-    # Use the rendered composite terrain.png as a SINGLE TerrainMaterial
-    # covering the whole map. Use a UNIQUE name (not "DefaultMaterial") —
-    # BeamNG has a built-in DefaultMaterial that overrides ours and renders
-    # as the warning_material checker.
-    _TERRAIN_MAT_NAME = "MapNG_Terrain"
-    materials = [_TERRAIN_MAT_NAME]
-    layer_map = np.zeros((size_px, size_px), dtype=np.uint8)
-    # Cache splat reference for the per-class texture write loop below
+    # Map our 8 land classes to vanilla BeamNG TerrainMaterial internalNames.
+    # The mainLevel.lua loads Industrial/Cliff/GridMap material pools at
+    # module-load time, so these names resolve to vanilla PBR materials
+    # with full base/detail/macro/normal/roughness/AO layers. Quality jump
+    # is dramatic vs. our flat composite texture.
+    #
+    # Industrial materials (highest quality, full PBR):
+    #   BeachSand, Concrete, Forest, Grass, Grass2, Grass3, Gravel, Mud,
+    #   Rock, RockyDirt, dirt, dirt_grass, dirt_loose, dirt_rocky_large,
+    #   forest_floor, groundmodel_asphalt1
+    _VANILLA_TERRAIN_MAT = {
+        "asphalt":  "groundmodel_asphalt1",
+        "concrete": "Concrete",
+        "lawn":     "Grass3",     # vivid green — best for short managed lawns
+        "pasture":  "Grass2",     # rougher pasture green
+        "earth":    "dirt",
+        "gravel":   "Gravel",
+        "water":    "BeachSand",  # WaterPlane handles the actual water
+        "forest":   "forest_floor",
+    }
+    use_simple = os.environ.get("MAPNG_TERRAIN_SIMPLE") == "1"
     _splat_for_export = splat
-    splat = None  # forces _terrain_materials_json into single-material mode
+
+    if splat is not None and not use_simple:
+        # Multi-material splat using vanilla TerrainMaterials.
+        materials = [_VANILLA_TERRAIN_MAT.get(l.cls.key, "Grass") for l in splat.layers]
+        remap = np.zeros(256, dtype=np.uint8)
+        for arr_idx, layer in enumerate(splat.layers):
+            remap[layer.cls.id] = arr_idx
+        layer_map = remap[splat.layer_index_map]
+        # Don't ship our own art/terrains/main.materials.json — vanilla
+        # materials are loaded via Lua. Set splat=None to skip our generator.
+        splat = None
+    else:
+        # Fallback: single MapNG_Terrain covering the whole map with our
+        # composite texture (same as before, set MAPNG_TERRAIN_SIMPLE=1
+        # if you don't want to depend on the user's vanilla install).
+        materials = ["MapNG_Terrain"]
+        layer_map = np.zeros((size_px, size_px), dtype=np.uint8)
+        splat = None
 
     # Write .ter binary
     ter_path = out_dir / "_tmp_theTerrain.ter"
