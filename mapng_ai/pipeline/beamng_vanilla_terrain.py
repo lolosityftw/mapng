@@ -285,16 +285,24 @@ def build_vanilla_terrain_pack(
                 mat[fk] = f"{our_terrain_dir}/{fname}"
 
             # CRITICAL: Industrial's `t_terrain_base_b.png` is a RENDERED
-            # image of Industrial's actual level (with race track, buildings,
-            # etc.) — NOT a tileable terrain texture. Reusing it on our map
-            # shows Industrial's race track tiled. Override baseColorBaseTex
-            # AFTER the resolve loop so the bundled (tiled-pattern) industrial
-            # base color is dropped, and use OUR composite terrain.png
-            # instead (our OSM-derived satellite-like imagery).
-            # The other Base channels (normalBase/roughnessBase/etc.) are
-            # neutral fillers that work for any terrain — leave them.
+            # image of Industrial's actual level (race track, buildings,
+            # etc.) — not a tileable terrain texture. Override
+            # baseColorBaseTex with OUR composite terrain.png (matches our
+            # actual OSM-derived imagery). Keep the other Base channels
+            # (normal/roughness/AO/height) — those are neutral fillers.
             mat["baseColorBaseTex"] = f"{our_terrain_dir}/terrain.png"
             mat["baseColorBaseTexSize"] = int(side_m)
+
+            # Industrial's COLOR blend strengths are tuned for Industrial's
+            # specific base imagery. With our satellite composite as base
+            # (already correctly coloured per area), the strong detail/macro
+            # tints overpower the base — every material renders as its
+            # detail tint (e.g. grass tints everything dark green).
+            # Drop COLOR blend strengths to near-zero so our base shows
+            # through. Keep NORMAL and ROUGHNESS strengths intact — those
+            # affect surface relief, not colour.
+            mat["baseColorDetailStrength"] = [0.1, 0.05]
+            mat["baseColorMacroStrength"]  = [0.05, 0.05]
 
             out_materials[f"{new_internal}-{pid}"] = mat
 
