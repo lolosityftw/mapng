@@ -71,10 +71,13 @@ class BeamNGAssetProvider:
             if cands:
                 rng = random.Random(seed)
                 pick = rng.choice(cands)
-                l, w, h = pick.natural_size_m
+                # Use the asset's ACTUAL natural size from the whitelist —
+                # the placement scaler relies on this matching the real DAE
+                # bounding box. Override here was the main cause of the
+                # 100×-too-big regression.
                 return BuildingAsset(
                     shape_relpath=pick.relpath.lstrip("/"),
-                    natural_size_m=(l, w, max(3.0, levels * 3.0)),
+                    natural_size_m=pick.natural_size_m,
                     color_hex="#999999",
                     type_label=pick.type,
                 )
