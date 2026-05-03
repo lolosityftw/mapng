@@ -484,16 +484,14 @@ async def stage_export(ctx: JobContext, emit: Emit) -> None:
     elif ctx.imagery is not None:
         terrain_png = ctx.imagery.sat_png_path.read_bytes()
 
-    # BeamNG asset reference mode — ON by default. We swap building +
-    # tree shape paths for cross-level references like
-    # `levels/west_coast_usa/art/shapes/...` so the user's BeamNG install
-    # supplies the geometry. The generated mainLevel.lua loads each
-    # referenced level's materials.json on level start (via
-    # `loadJsonMaterialsFile`) so the shapes render with proper textures
-    # instead of the pink NO-MATERIAL placeholder. Set
-    # MAPNG_BEAMNG_REFS=0 to fall back to our local placeholder DAEs.
+    # BeamNG asset reference mode — OFF by default. When enabled, swaps
+    # building + tree shape paths for cross-level refs like
+    # `levels/west_coast_usa/art/shapes/...`. This pulls textures from the
+    # foreign installed level which often gives mismatched results (e.g.
+    # kanji-textured Asian building textures on NI villages). Set
+    # MAPNG_BEAMNG_REFS=1 to enable.
     import os as _os
-    refs_enabled = _os.environ.get("MAPNG_BEAMNG_REFS", "1") == "1"
+    refs_enabled = _os.environ.get("MAPNG_BEAMNG_REFS", "0") == "1"
     export_buildings = ctx.buildings
     export_foliage = ctx.foliage
     beamng_subs = 0
