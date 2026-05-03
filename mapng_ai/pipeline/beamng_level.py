@@ -199,15 +199,43 @@ def _terrain_materials_json(level_name: str, side_m: float,
 # ---------------------------------------------------------------------------
 
 def _main_level_lua(level_name: str, foreign_levels: list[str]) -> str:
-    """Minimal level script. BeamNG auto-discovers *.materials.json files in
-    the level's art/ subdirectories during resource scanning, before any
-    scene object is instantiated, so we don't need to load them explicitly.
+    """Level script. BeamNG does NOT auto-discover *.materials.json from mod
+    zips for level mods, so we have to load them explicitly. We do this at
+    module-load (top-level code) which runs during the level's resource
+    setup phase — before TerrainBlock and DecalRoad are instantiated.
+    Confirmed empirically: terrain init at +0.4s vs material loading at
+    +0.2s into level load.
     """
+    foreign_lua = "{}" if not foreign_levels else (
+        "{\n" + "\n".join(f"  '{name}'," for name in foreign_levels) + "\n}"
+    )
     return (
         "-- MapNG-AI generated level\n"
         "local M = {}\n"
         "\n"
-        "function M.onClientStartMission() end\n"
+        f"local foreignLevels = {foreign_lua}\n"
+        "\n"
+        "local function loadMaterialsFromDir(dir)\n"
+        "  local files = FS:findFiles(dir, '*.materials.json', -1, true, false)\n"
+        "  if not files then return end\n"
+        "  for _, filename in ipairs(files) do\n"
+        "    loadJsonMaterialsFile(filename)\n"
+        "  end\n"
+        "end\n"
+        "\n"
+        "-- Module-load: register materials so the terrain/road/TSStatic\n"
+        "-- objects can resolve them when the scene is built.\n"
+        f"loadMaterialsFromDir('/levels/{level_name}/art/')\n"
+        "for _, name in ipairs(foreignLevels) do\n"
+        "  loadMaterialsFromDir('/levels/' .. name .. '/art/')\n"
+        "end\n"
+        "\n"
+        "function M.onClientStartMission()\n"
+        f"  loadMaterialsFromDir('/levels/{level_name}/art/')\n"
+        "  for _, name in ipairs(foreignLevels) do\n"
+        "    loadMaterialsFromDir('/levels/' .. name .. '/art/')\n"
+        "  end\n"
+        "end\n"
         "function M.onUpdate() end\n"
         "function M.onSerialize() return {} end\n"
         "function M.onDeserialized(data) end\n"
@@ -623,6 +651,38 @@ def write_level_package(
     if heightmap_m.shape[1] != size_px:
         raise ValueError("heightmap must be square")
 
+    # ------------------------------------------------------------------
+    # Normalize asset paths: BeamNG TSStatic ONLY accepts .dae (COLLADA).
+    # Force any building/tree referencing .glb (or any non-.dae) to use
+    # our placeholder DAE — otherwise BeamNG logs "Unknown file format"
+    # and the asset renders as the pink debug texture.
+    # ------------------------------------------------------------------
+    from dataclasses import replace as _replace
+    normalized_buildings = []
+    for b in buildings:
+        rel = b.asset.shape_relpath
+        if rel.startswith("levels/") or rel.endswith(".dae"):
+            normalized_buildings.append(b)
+            continue
+        # Replace with placeholder DAE based on building type
+        type_label = b.asset.type_label.replace("_meshy", "")
+        _, dae_rel = write_pitched_dae(type_label)
+        new_asset = _replace(b.asset, shape_relpath=dae_rel)
+        normalized_buildings.append(_replace(b, asset=new_asset))
+    buildings = normalized_buildings
+
+    if foliage and foliage.trees:
+        normalized_trees = []
+        _, tree_dae_rel = write_tree_dae()
+        for t in foliage.trees:
+            rel = t.shape_relpath
+            if rel.startswith("levels/") or rel.endswith(".dae"):
+                normalized_trees.append(t)
+                continue
+            normalized_trees.append(_replace(t, shape_relpath=tree_dae_rel))
+        from dataclasses import replace as _r2
+        foliage = _r2(foliage, trees=normalized_trees)
+
     # Resolve material list and layer map
     if splat is not None:
         materials = [f"mat_{l.cls.key}" for l in splat.layers]
@@ -750,50 +810,35 @@ def write_level_package(
     # ------------------------------------------------------------------
     # Building shapes
     # ------------------------------------------------------------------
-    from mapng_ai.assets.library import building_library_fs_path
     if buildings:
         seen: set[str] = set()
         for b in buildings:
             rel = b.asset.shape_relpath
-            if rel in seen:
+            if rel in seen or rel.startswith("levels/"):
                 continue
             seen.add(rel)
-            if rel.startswith("levels/"):
-                continue
-            lib_fs = building_library_fs_path(rel)
-            if lib_fs is not None:
-                w(f"{base}/{rel}", lib_fs.read_bytes())
-                continue
-            cache_path, fallback_rel = write_pitched_dae(
+            # All non-foreign assets are normalized to .dae paths above,
+            # so just generate the placeholder DAE for the requested path.
+            cache_path, _ = write_pitched_dae(
                 b.asset.type_label.replace("_meshy", "")
             )
-            w(f"{base}/{rel if rel.endswith('.dae') else fallback_rel}",
-              cache_path.read_bytes())
+            w(f"{base}/{rel}", cache_path.read_bytes())
 
     # ------------------------------------------------------------------
     # Foliage shapes (trees + hedges)
     # ------------------------------------------------------------------
     if foliage and (foliage.trees or foliage.hedges):
-        from mapng_ai.assets.library import tree_library
         seen_tree: set[str] = set()
         if foliage.trees:
-            tree_lib = tree_library()
-            lib_lookup: dict[str, Path] = {}
-            for entries in tree_lib.values():
-                for e in entries:
-                    lib_lookup[e.rel_path] = e.fs_path
+            placeholder_path, _ = write_tree_dae()
             for t in foliage.trees:
                 rel = t.shape_relpath
-                if rel in seen_tree:
+                if rel in seen_tree or rel.startswith("levels/"):
                     continue
                 seen_tree.add(rel)
-                if rel.startswith("levels/"):
-                    continue
-                if rel in lib_lookup:
-                    w(f"{base}/{rel}", lib_lookup[rel].read_bytes())
-                else:
-                    placeholder_path, _ = write_tree_dae()
-                    w(f"{base}/{rel}", placeholder_path.read_bytes())
+                # All non-foreign tree paths are normalized to .dae above,
+                # so write the placeholder DAE there.
+                w(f"{base}/{rel}", placeholder_path.read_bytes())
         if foliage.hedges:
             mats = {getattr(h, "material", "hedge") for h in foliage.hedges}
             if "hedge" in mats:
