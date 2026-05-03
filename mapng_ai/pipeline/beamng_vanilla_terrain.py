@@ -268,7 +268,8 @@ def build_vanilla_terrain_pack(
                 f"mapng:terrain:{level_name}:{new_internal}",
             ))
             mat["persistentId"] = pid
-            mat["diffuseSize"] = int(side_m)
+            # Keep Industrial's diffuseSize/detailSize/macroSize — those are
+            # tuned for the per-material textures we're now using as base.
 
             for fk in _TEX_FIELDS:
                 tex_path = mat.get(fk)
@@ -284,25 +285,26 @@ def build_vanilla_terrain_pack(
                     bundle_files[bundle_relpath] = blob
                 mat[fk] = f"{our_terrain_dir}/{fname}"
 
-            # CRITICAL: Industrial's `t_terrain_base_b.png` is a RENDERED
-            # image of Industrial's actual level (race track, buildings,
-            # etc.) — not a tileable terrain texture. Override
-            # baseColorBaseTex with OUR composite terrain.png (matches our
-            # actual OSM-derived imagery). Keep the other Base channels
-            # (normal/roughness/AO/height) — those are neutral fillers.
-            mat["baseColorBaseTex"] = f"{our_terrain_dir}/terrain.png"
-            mat["baseColorBaseTexSize"] = int(side_m)
-
-            # Industrial's COLOR blend strengths are tuned for Industrial's
-            # specific base imagery. With our satellite composite as base
-            # (already correctly coloured per area), the strong detail/macro
-            # tints overpower the base — every material renders as its
-            # detail tint (e.g. grass tints everything dark green).
-            # Drop COLOR blend strengths to near-zero so our base shows
-            # through. Keep NORMAL and ROUGHNESS strengths intact — those
-            # affect surface relief, not colour.
-            mat["baseColorDetailStrength"] = [0.1, 0.05]
-            mat["baseColorMacroStrength"]  = [0.05, 0.05]
+            # Industrial's `t_terrain_base_b.png` is a RENDERED image of
+            # Industrial's actual level (race track, buildings, etc.) —
+            # NOT a generic tileable texture. Reusing it on our map shows
+            # Industrial's race track tiled.
+            #
+            # The PROPER BeamNG approach: each TerrainMaterial has its own
+            # distinct base texture matching that material's character
+            # (grass material → grass base, asphalt → asphalt base, etc.).
+            # The .ter layerMap tells BeamNG which material to render
+            # per-pixel; BeamNG blends between adjacent materials at
+            # boundaries. Detail and macro layers add close/mid-range
+            # variation on top of the per-material base.
+            #
+            # We achieve this by reusing the bundled per-material DETAIL
+            # texture as the BASE texture (it's already a tileable pattern
+            # of grass/asphalt/dirt/etc., and we already shipped it).
+            detail_tex = mat.get("baseColorDetailTex")
+            if isinstance(detail_tex, str):
+                mat["baseColorBaseTex"] = detail_tex
+                mat["baseColorBaseTexSize"] = mat.get("baseColorDetailTexSize", 1024)
 
             out_materials[f"{new_internal}-{pid}"] = mat
 
