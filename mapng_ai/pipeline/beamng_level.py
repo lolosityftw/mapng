@@ -65,7 +65,8 @@ def _shape_materials_json(level_name: str) -> dict:
     def _mat(name: str, hex_color: str) -> dict:
         r, g, b = _hex_to_float3(hex_color)
         return {
-            "mapTo": name,
+            "name": name,                    # REQUIRED — BeamNG rejects materials
+            "mapTo": name,                   # without 'name' as "Cannot map unnamed Material"
             "class": "Material",
             "Stages": [
                 {
@@ -173,6 +174,7 @@ def _terrain_materials_json(level_name: str, side_m: float,
     if splat is None:
         return {
             "DefaultMaterial": {
+                "name": "DefaultMaterial",
                 "mapTo": "DefaultMaterial",
                 "class": "TerrainMaterial",
                 "internalName": "DefaultMaterial",
@@ -187,6 +189,7 @@ def _terrain_materials_json(level_name: str, side_m: float,
         key = layer.cls.key
         ext = layer.diffuse_path.suffix.lower()
         mat: dict = {
+            "name": f"mat_{key}",
             "mapTo": f"mat_{key}",
             "class": "TerrainMaterial",
             "internalName": f"mat_{key}",
@@ -262,7 +265,8 @@ def _main_level_lua(level_name: str, foreign_levels: list[str]) -> str:
 def _road_materials_json(level_name: str) -> dict:
     def _mat(name: str, tex_path: str) -> dict:
         return {
-            "mapTo": name,
+            "name": name,                    # REQUIRED — Material class needs 'name'
+            "mapTo": name,                   # or BeamNG drops it as "unnamed"
             "class": "Material",
             "translucent": True,
             "translucentBlendOp": "PreMulAlpha",
