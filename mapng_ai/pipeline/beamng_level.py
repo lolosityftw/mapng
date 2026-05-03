@@ -172,12 +172,15 @@ def _terrain_materials_json(level_name: str, side_m: float,
     }
 
     if splat is None:
+        # Single full-map terrain texture. Name MUST be unique — using
+        # "DefaultMaterial" causes a name clash with BeamNG's built-in,
+        # which silently shadows our material with the warning checker.
         return {
-            "DefaultMaterial": {
-                "name": "DefaultMaterial",
-                "mapTo": "DefaultMaterial",
+            "MapNG_Terrain": {
+                "name": "MapNG_Terrain",
+                "mapTo": "MapNG_Terrain",
                 "class": "TerrainMaterial",
-                "internalName": "DefaultMaterial",
+                "internalName": "MapNG_Terrain",
                 "diffuseMap": f"levels/{level_name}/art/terrains/terrain.png",
                 "diffuseSize": int(side_m),
                 "groundmodelName": "ASPHALT",
@@ -700,16 +703,13 @@ def write_level_package(
         foliage = _r2(foliage, trees=normalized_trees)
 
     # Use the rendered composite terrain.png as a SINGLE TerrainMaterial
-    # covering the whole map. This is far more reliable than splatting
-    # multiple TerrainMaterial layers (which kept rendering as
-    # warning_material because BeamNG's TerrainMaterial loader is finicky).
-    # The combined diffuse already reflects all per-class colours, so the
-    # visual result is the same as the user's preview.
-    materials = ["DefaultMaterial"]
+    # covering the whole map. Use a UNIQUE name (not "DefaultMaterial") —
+    # BeamNG has a built-in DefaultMaterial that overrides ours and renders
+    # as the warning_material checker.
+    _TERRAIN_MAT_NAME = "MapNG_Terrain"
+    materials = [_TERRAIN_MAT_NAME]
     layer_map = np.zeros((size_px, size_px), dtype=np.uint8)
-    # Cache splat reference for the per-class texture write loop below;
-    # we still ship the per-class textures for future use, but only
-    # DefaultMaterial is referenced in the .ter binary.
+    # Cache splat reference for the per-class texture write loop below
     _splat_for_export = splat
     splat = None  # forces _terrain_materials_json into single-material mode
 
