@@ -226,10 +226,10 @@ def _terrain_materials_json(level_name: str, side_m: float,
 # ---------------------------------------------------------------------------
 
 def _main_level_lua(level_name: str, foreign_levels: list[str]) -> str:
-    """Minimal level script. Loads our own materials at module-load time
-    as a safety net (BeamNG already auto-discovers them from art/ subdirs).
-    All terrain textures are bundled in our zip — no dependency on which
-    vanilla levels happen to be loaded.
+    """Level script. Loads our own materials and any foreign-level material
+    pools we reference (Italy buildings/foliage). Module-load time runs
+    during the level's resource setup phase — before TerrainBlock and
+    TSStatic are instantiated.
     """
     foreign_lua = "{}" if not foreign_levels else (
         "{\n" + "\n".join(f"  '{name}'," for name in foreign_levels) + "\n}"
@@ -248,17 +248,16 @@ def _main_level_lua(level_name: str, foreign_levels: list[str]) -> str:
         "  end\n"
         "end\n"
         "\n"
-        f"loadMaterialsFromDir('/levels/{level_name}/art/')\n"
-        "for _, name in ipairs(foreignLevels) do\n"
-        "  loadMaterialsFromDir('/levels/' .. name .. '/art/')\n"
-        "end\n"
-        "\n"
-        "function M.onClientStartMission()\n"
+        "local function loadAllMaterials()\n"
         f"  loadMaterialsFromDir('/levels/{level_name}/art/')\n"
         "  for _, name in ipairs(foreignLevels) do\n"
         "    loadMaterialsFromDir('/levels/' .. name .. '/art/')\n"
         "  end\n"
         "end\n"
+        "\n"
+        "loadAllMaterials()\n"
+        "\n"
+        "function M.onClientStartMission() loadAllMaterials() end\n"
         "function M.onUpdate() end\n"
         "function M.onSerialize() return {} end\n"
         "function M.onDeserialized(data) end\n"

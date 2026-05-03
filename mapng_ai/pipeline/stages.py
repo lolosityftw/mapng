@@ -484,14 +484,14 @@ async def stage_export(ctx: JobContext, emit: Emit) -> None:
     elif ctx.imagery is not None:
         terrain_png = ctx.imagery.sat_png_path.read_bytes()
 
-    # BeamNG asset reference mode — OFF by default. When enabled, swaps
-    # building + tree shape paths for cross-level refs like
-    # `levels/west_coast_usa/art/shapes/...`. This pulls textures from the
-    # foreign installed level which often gives mismatched results (e.g.
-    # kanji-textured Asian building textures on NI villages). Set
-    # MAPNG_BEAMNG_REFS=1 to enable.
+    # BeamNG asset reference mode — ON by default, restricted to ITALY ONLY.
+    # Italy is rural Mediterranean countryside (village houses, stone walls,
+    # churches, dirt tracks) — closest vanilla match for NI villages. The
+    # earlier kanji-textured buildings issue was caused by scanning multiple
+    # vanilla levels simultaneously; locking to Italy avoids that. Set
+    # MAPNG_BEAMNG_REFS=0 to fall back to placeholder COLLADA buildings.
     import os as _os
-    refs_enabled = _os.environ.get("MAPNG_BEAMNG_REFS", "0") == "1"
+    refs_enabled = _os.environ.get("MAPNG_BEAMNG_REFS", "1") == "1"
     export_buildings = ctx.buildings
     export_foliage = ctx.foliage
     beamng_subs = 0

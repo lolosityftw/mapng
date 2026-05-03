@@ -25,13 +25,11 @@ from pathlib import Path
 
 
 _DEFAULT_LEVELS = (
-    "small_island",     # rolling fields + small town buildings
-    "italy",            # Italian rural / town
-    "west_coast_usa",   # mixed urban + rural
-    "east_coast_usa",
-    "smallgrid",        # not useful but cheap to scan
-    "utah",             # rural USA
-    "automation_test_track",
+    # Italy ONLY — its rural Mediterranean style (stone walls, small village
+    # houses, churches, dirt tracks) is the closest vanilla match for NI
+    # countryside. Other levels brought in mismatched buildings (e.g. ECA
+    # American houses, Asian-DLC kanji shop signs).
+    "italy",
 )
 
 
