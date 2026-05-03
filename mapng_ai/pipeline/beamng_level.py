@@ -699,17 +699,19 @@ def write_level_package(
         from dataclasses import replace as _r2
         foliage = _r2(foliage, trees=normalized_trees)
 
-    # Resolve material list and layer map
-    if splat is not None:
-        materials = [f"mat_{l.cls.key}" for l in splat.layers]
-        remap = np.zeros(256, dtype=np.uint8)
-        for arr_idx, layer in enumerate(splat.layers):
-            remap[layer.cls.id] = arr_idx
-        layer_map = remap[splat.layer_index_map]
-    elif material_names is not None:
-        materials = list(material_names)
-    else:
-        materials = ["DefaultMaterial"]
+    # Use the rendered composite terrain.png as a SINGLE TerrainMaterial
+    # covering the whole map. This is far more reliable than splatting
+    # multiple TerrainMaterial layers (which kept rendering as
+    # warning_material because BeamNG's TerrainMaterial loader is finicky).
+    # The combined diffuse already reflects all per-class colours, so the
+    # visual result is the same as the user's preview.
+    materials = ["DefaultMaterial"]
+    layer_map = np.zeros((size_px, size_px), dtype=np.uint8)
+    # Cache splat reference for the per-class texture write loop below;
+    # we still ship the per-class textures for future use, but only
+    # DefaultMaterial is referenced in the .ter binary.
+    _splat_for_export = splat
+    splat = None  # forces _terrain_materials_json into single-material mode
 
     # Write .ter binary
     ter_path = out_dir / "_tmp_theTerrain.ter"
@@ -721,14 +723,14 @@ def write_level_package(
     # causes load failures unless we ship a fully validated field set)
     water_z: float | None = None
     if (os.environ.get("MAPNG_WATER_PLANE") == "1"
-            and splat is not None
-            and splat.layer_index_map is not None):
+            and _splat_for_export is not None
+            and _splat_for_export.layer_index_map is not None):
         try:
             from mapng_ai.pipeline.classmap import CLASSES as _C
             water_id = next((c.id for c in _C.values() if c.key == "water"), None)
             if water_id is not None:
                 hmap = heightmap_m
-                lmap = splat.layer_index_map[::-1, :]
+                lmap = _splat_for_export.layer_index_map[::-1, :]
                 if lmap.shape == hmap.shape:
                     water_pixels = hmap[lmap == water_id]
                     if water_pixels.size > 50:
@@ -782,27 +784,20 @@ def write_level_package(
     w(f"{base}/art/terrains/main.materials.json",
       json.dumps(_terrain_materials_json(level_name, side_m, splat), indent=2))
 
-    # Per-class PBR diffuse + optional normal/roughness + opacity mask
-    if splat is not None:
-        for layer in splat.layers:
-            key = layer.cls.key
-            de = layer.diffuse_path.suffix.lower()
-            w(f"{base}/art/terrains/diffuse_{key}{de}", layer.diffuse_path.read_bytes())
-            # Opacity PNGs are kept in the zip for the world editor; they are NOT
-            # referenced in materials.json (blending is encoded in .ter layerMap).
-            w(f"{base}/art/terrains/opacity_{key}.png", layer.opacity_path.read_bytes())
-            if layer.normal_path is not None:
-                ne = layer.normal_path.suffix.lower()
-                w(f"{base}/art/terrains/normal_{key}{ne}", layer.normal_path.read_bytes())
-            if layer.roughness_path is not None:
-                re_ = layer.roughness_path.suffix.lower()
-                w(f"{base}/art/terrains/rough_{key}{re_}", layer.roughness_path.read_bytes())
-
-    # Base diffuse texture (single large image that covers the whole terrain)
+    # Base diffuse texture — this IS the terrain visual now, since we use a
+    # single DefaultMaterial covering the whole map.
     if terrain_png_bytes is not None:
         w(f"{base}/art/terrains/terrain.png", terrain_png_bytes)
-    elif splat is not None:
-        w(f"{base}/art/terrains/terrain.png", splat.combined_diffuse_path.read_bytes())
+    elif _splat_for_export is not None:
+        # Prefer the detailed composite (includes per-class PBR detail
+        # blended over satellite imagery) if available; fall back to the
+        # plain combined diffuse swatch.
+        detailed = getattr(_splat_for_export, "detailed_diffuse_path", None)
+        if detailed is not None:
+            w(f"{base}/art/terrains/terrain.png", detailed.read_bytes())
+        else:
+            w(f"{base}/art/terrains/terrain.png",
+              _splat_for_export.combined_diffuse_path.read_bytes())
     else:
         w(f"{base}/art/terrains/terrain.png", _flat_terrain_png())
 
