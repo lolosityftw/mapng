@@ -169,12 +169,19 @@ def build_vanilla_terrain_pack(
     level_name: str,
     classes_used: List[str],
     industrial_zip: Path | None = None,
+    side_m: float = 1024.0,
 ) -> Tuple[Dict[str, dict], List[Tuple[str, bytes]]] | None:
     """Build a vanilla terrain material pack for the given list of class keys.
 
     Bundles ALL texture files into our mod (both Industrial-local PNGs and
     redirected /assets/... PNGs from terrain.zip). Empirically the redirect
     paths don't resolve from a mod context, so we copy everything in.
+
+    side_m: terrain side length in metres. Used to scale `diffuseSize` so
+    the base color texture wraps once across the whole map instead of the
+    Industrial default (1024m/wrap) which tiles visibly on larger maps.
+    detailSize (2m) and macroSize (80m) are kept small — they tile so
+    frequently they read as noise rather than visible repetition.
     """
     industrial_zip = industrial_zip or find_industrial_zip()
     if industrial_zip is None:
@@ -235,11 +242,14 @@ def build_vanilla_terrain_pack(
             if v.get("class") == "TerrainMaterialTextureSet":
                 ts_template = v
                 break
+        # Our terrain.png is the satellite/OSM composite — typically 2048×2048.
+        # Override the TextureSet's base size to match (Industrial uses 1024×1024
+        # because its base textures are 1024 pixels; ours are bigger).
         texture_set = {
             "name": ts_name,
             "class": "TerrainMaterialTextureSet",
             "persistentId": ts_pid,
-            "baseTexSize":   ts_template["baseTexSize"]   if ts_template else [1024, 1024],
+            "baseTexSize":   [2048, 2048],
             "detailTexSize": ts_template["detailTexSize"] if ts_template else [1024, 1024],
             "macroTexSize":  ts_template["macroTexSize"]  if ts_template else [1024, 1024],
         }
@@ -258,6 +268,7 @@ def build_vanilla_terrain_pack(
                 f"mapng:terrain:{level_name}:{new_internal}",
             ))
             mat["persistentId"] = pid
+            mat["diffuseSize"] = int(side_m)
 
             for fk in _TEX_FIELDS:
                 tex_path = mat.get(fk)
@@ -265,7 +276,6 @@ def build_vanilla_terrain_pack(
                     continue
                 blob = _resolve_texture_bytes(tex_path, izf, redirects, tzf)
                 if blob is None:
-                    # Couldn't find the texture anywhere — drop the field
                     mat.pop(fk, None)
                     continue
                 fname = tex_path.lstrip("/").rsplit("/", 1)[-1]
@@ -273,6 +283,18 @@ def build_vanilla_terrain_pack(
                 if bundle_relpath not in bundle_files:
                     bundle_files[bundle_relpath] = blob
                 mat[fk] = f"{our_terrain_dir}/{fname}"
+
+            # CRITICAL: Industrial's `t_terrain_base_b.png` is a RENDERED
+            # image of Industrial's actual level (with race track, buildings,
+            # etc.) — NOT a tileable terrain texture. Reusing it on our map
+            # shows Industrial's race track tiled. Override baseColorBaseTex
+            # AFTER the resolve loop so the bundled (tiled-pattern) industrial
+            # base color is dropped, and use OUR composite terrain.png
+            # instead (our OSM-derived satellite-like imagery).
+            # The other Base channels (normalBase/roughnessBase/etc.) are
+            # neutral fillers that work for any terrain — leave them.
+            mat["baseColorBaseTex"] = f"{our_terrain_dir}/terrain.png"
+            mat["baseColorBaseTexSize"] = int(side_m)
 
             out_materials[f"{new_internal}-{pid}"] = mat
 
