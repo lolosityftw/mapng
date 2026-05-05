@@ -412,17 +412,53 @@ def _decal_roads_objects(roads: Sequence[DecalRoad]) -> list[dict]:
             "nodes": [[x, y, z, road.width_m] for (x, y, z) in road.nodes_xyz],
             "drivability": 0.6 if is_drive else 1.0,
             "renderPriority": 8 if is_drive else 10,
-            # breakAngle = max angle (degrees) the spline tolerates before
-            # snapping to a hard corner. 3° was way too tight — any rural
-            # bend > 3° showed a visible tear in the decal. Vanilla uses
-            # ~22° which produces smooth curves at typical road angles.
             "breakAngle": 22,
             "distanceFade": [200, 50],
             "startEndFade": [5, 5],
             "textureLength": 5.0 if is_drive else 12.0,
             "improvedSpline": True,
-            "smoothness": 1.0,  # full smoothness; was 0.5 (jagged)
+            "smoothness": 1.0,
             "useSubdivisions": True,
+        })
+    return out
+
+
+def _mesh_roads_objects(roads: Sequence[DecalRoad]) -> list[dict]:
+    """3D extruded MeshRoad geometry — what the nikkiluzader/mapng reference
+    uses. Each road segment becomes a 3D ribbon with `m_asphalt_new_01`
+    (built-in BeamNG asphalt material that auto-loads). Way more robust
+    than DecalRoad: no flat-on-terrain tearing, real geometry that handles
+    junctions and slope changes cleanly.
+
+    Node format is `[x, y, z, fullWidth, depth, normalX, normalY, normalZ]`
+    (8 values vs DecalRoad's 4). Depth is how deep the road is extruded
+    below the surface — vanilla uses 0.5m. Normal is per-node up-vector.
+    """
+    out = []
+    for road in roads:
+        is_drive = getattr(road, "material", "asphalt") == "dirt"
+        # Italy ships m_asphalt_new_01 (modern asphalt) and dirt road material
+        material = "italy_dirt_road" if is_drive else "m_asphalt_new_01"
+        prefix = "drive" if is_drive else "road"
+        if not road.nodes_xyz:
+            continue
+        # Lift roads slightly above terrain (z + 0.1) to avoid z-fighting
+        nodes = [
+            [x, y, z + 0.1, road.width_m, 0.5, 0, 0, 1]
+            for (x, y, z) in road.nodes_xyz
+        ]
+        first = nodes[0]
+        out.append({
+            "class": "MeshRoad",
+            "name": f"mesh{prefix}_{road.osm_id}",
+            "position": [first[0], first[1], first[2]],
+            "topMaterial":    material,
+            "sideMaterial":   material,
+            "bottomMaterial": material,
+            "textureLength":  16,
+            "breakAngle":     3,   # MeshRoads use a different break-angle
+                                    # semantic — 3° is fine here (segment-level)
+            "nodes": nodes,
         })
     return out
 
@@ -583,11 +619,23 @@ def _mission_group(
             "childs": _hedge_tsstatics(level_name, foliage.hedges),
         })
     if roads:
-        children.append({
-            "class": "SimGroup",
-            "name": "Decal_Roads",
-            "childs": _decal_roads_objects(roads),
-        })
+        # Default to MeshRoad (3D geometry — what nikkiluzader/mapng uses).
+        # Cleaner than DecalRoad: no flat-on-terrain tearing, no warning_material
+        # fallback, references built-in vanilla material `m_asphalt_new_01`.
+        # Set MAPNG_DECAL_ROADS=1 to use the old DecalRoad path.
+        use_decal = os.environ.get("MAPNG_DECAL_ROADS") == "1"
+        if use_decal:
+            children.append({
+                "class": "SimGroup",
+                "name": "Decal_Roads",
+                "childs": _decal_roads_objects(roads),
+            })
+        else:
+            children.append({
+                "class": "SimGroup",
+                "name": "Mesh_roads",
+                "childs": _mesh_roads_objects(roads),
+            })
     return {"class": "SimGroup", "name": "MissionGroup", "childs": children}
 
 
