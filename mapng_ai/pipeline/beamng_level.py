@@ -645,11 +645,22 @@ def _mission_group(
             "childs": _building_tsstatics(level_name, buildings),
         })
     if foliage and foliage.trees:
-        children.append({
-            "class": "SimGroup",
-            "name": "trees",
-            "childs": _tree_tsstatics(level_name, foliage.trees),
-        })
+        # Split: trees → Forest object (10× more efficient than TSStatic),
+        # bushes → TSStatics (kept simple, only ~2k of them).
+        from mapng_ai.pipeline.forest import split_trees_and_bushes, forest_scene_objects
+        forest_trees, bush_trees = split_trees_and_bushes(foliage.trees)
+        if forest_trees:
+            children.append({
+                "class": "SimGroup",
+                "name": "vegetation",
+                "childs": forest_scene_objects(level_name),
+            })
+        if bush_trees:
+            children.append({
+                "class": "SimGroup",
+                "name": "trees",
+                "childs": _tree_tsstatics(level_name, bush_trees),
+            })
     if foliage and foliage.hedges:
         children.append({
             "class": "SimGroup",
@@ -1025,6 +1036,9 @@ def write_level_package(
     # ------------------------------------------------------------------
     if foliage and (foliage.trees or foliage.hedges):
         from mapng_ai.assets.placeholder import write_bush_dae as _write_bush_dae
+        from mapng_ai.pipeline.forest import (
+            tree_managed_item_data, trees_forest4_lines, split_trees_and_bushes
+        )
         seen_tree: set[str] = set()
         if foliage.trees:
             tree_path, _ = write_tree_dae()
@@ -1034,11 +1048,18 @@ def write_level_package(
                 if rel in seen_tree or rel.startswith("levels/"):
                     continue
                 seen_tree.add(rel)
-                # Pick the right placeholder DAE based on shape relpath
-                # (bush.dae uses the low-poly bush; everything else gets
-                # the cone+cylinder tree).
                 src = bush_path if rel.endswith("/bush.dae") else tree_path
                 w(f"{base}/{rel}", src.read_bytes())
+
+            # Forest data: managedItemData.json defines species, then
+            # one .forest4.json per species with all instances.
+            forest_trees, _ = split_trees_and_bushes(foliage.trees)
+            if forest_trees:
+                w(f"{base}/art/forest/managedItemData.json",
+                  json.dumps(tree_managed_item_data(level_name), indent=2))
+                lines = trees_forest4_lines(forest_trees)
+                w(f"{base}/forest/MapNG_tree.forest4.json",
+                  "\n".join(lines) + ("\n" if lines else ""))
         if foliage.hedges:
             mats = {getattr(h, "material", "hedge") for h in foliage.hedges}
             if "hedge" in mats:
