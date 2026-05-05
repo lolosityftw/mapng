@@ -67,6 +67,126 @@ def _infer_type(tags: dict) -> str:
     return val or "default"
 
 
+# ---------------------------------------------------------------------------
+# Settlement classifier — picks a "context tag" per building that
+# influences which placeholder type (or which Italy whitelist subset)
+# the placement uses.
+#
+# Context tags (in priority order):
+#   industrial    — inside OSM landuse=industrial polygon
+#   commercial    — inside OSM landuse=commercial/retail polygon
+#   town_centre   — high local building density (>=8 nearby)
+#   suburb        — medium local density (3-7) or inside landuse=residential
+#   village       — small isolated cluster (place=village/hamlet within 200m)
+#   rural         — everything else (default — isolated farms, barns, cottages)
+# ---------------------------------------------------------------------------
+
+def _build_zone_polygons(osm: OSMData, cx_world: float, cy_world: float,
+                         landuse_values: set[str]) -> Polygon | None:
+    """Project + union OSM landuse polygons matching the given values."""
+    polys: list[Polygon] = []
+    for w in osm.ways:
+        tags = w.get("tags") or {}
+        if tags.get("landuse") not in landuse_values:
+            continue
+        ring_ll = way_polygon_ll(w, osm.nodes)
+        if ring_ll is None:
+            continue
+        try:
+            lon, lat = zip(*ring_ll)
+            xs, ys = _LL_TO_ITM.transform(list(lon), list(lat))
+            xs_local = [x - cx_world for x in xs]
+            ys_local = [y - cy_world for y in ys]
+            poly = Polygon(zip(xs_local, ys_local))
+            if poly.is_valid and not poly.is_empty:
+                polys.append(poly)
+        except Exception:
+            continue
+    if not polys:
+        return None
+    try:
+        from shapely.ops import unary_union
+        return unary_union(polys)
+    except Exception:
+        return None
+
+
+def _building_centres(osm: OSMData, cx_world: float, cy_world: float
+                     ) -> list[tuple[float, float]]:
+    """Return all OSM building centroids in terrain-local coords."""
+    out: list[tuple[float, float]] = []
+    for w in osm.ways:
+        tags = w.get("tags") or {}
+        if "building" not in tags:
+            continue
+        ring_ll = way_polygon_ll(w, osm.nodes)
+        if ring_ll is None:
+            continue
+        try:
+            lon, lat = zip(*ring_ll)
+            xs, ys = _LL_TO_ITM.transform(list(lon), list(lat))
+            cx = sum(xs) / len(xs) - cx_world
+            cy = sum(ys) / len(ys) - cy_world
+            out.append((cx, cy))
+        except Exception:
+            continue
+    return out
+
+
+def _classify_settlement(cx: float, cy: float,
+                         industrial_zone, commercial_zone, residential_zone,
+                         all_centres: list[tuple[float, float]]) -> str:
+    """Classify a building's local settlement context. Returns one of:
+    industrial, commercial, town_centre, suburb, village, rural."""
+    pt = Point(cx, cy)
+    if industrial_zone is not None and industrial_zone.contains(pt):
+        return "industrial"
+    if commercial_zone is not None and commercial_zone.contains(pt):
+        return "commercial"
+    # Local density: count buildings within 100 m
+    density = sum(1 for (bx, by) in all_centres
+                  if (bx - cx) ** 2 + (by - cy) ** 2 < 100 * 100)
+    if density >= 8:
+        return "town_centre"
+    if density >= 3:
+        return "suburb"
+    if residential_zone is not None and residential_zone.contains(pt):
+        return "village"
+    return "rural"
+
+
+# Settlement → preferred placeholder type override.
+# Maps OSM `building=*` → final placeholder type, given the surrounding
+# context. e.g. residential + town_centre → 3-storey apartment;
+# residential + rural → smaller "house".
+_SETTLEMENT_TYPE_REMAP: dict[tuple[str, str], str] = {
+    # (osm_type, settlement) → placeholder type
+    ("residential", "town_centre"): "apartment",
+    ("residential", "suburb"):       "semi",
+    ("residential", "village"):      "house",
+    ("residential", "rural"):        "house",
+    ("default",     "town_centre"): "apartment",
+    ("default",     "suburb"):       "residential",
+    ("default",     "village"):      "house",
+    ("default",     "rural"):        "house",
+    ("default",     "industrial"):   "warehouse",
+    ("default",     "commercial"):   "shop",
+    ("yes",         "industrial"):   "warehouse",
+    ("yes",         "commercial"):   "shop",
+    ("house",       "rural"):        "house",
+    ("house",       "village"):      "house",
+}
+
+
+def _remap_type(osm_type: str, settlement: str) -> str:
+    """Pick the placeholder type given OSM tag + settlement context."""
+    key = (osm_type, settlement)
+    if key in _SETTLEMENT_TYPE_REMAP:
+        return _SETTLEMENT_TYPE_REMAP[key]
+    # No specific override — keep the OSM type
+    return osm_type
+
+
 def _infer_levels_and_height(tags: dict, footprint_m2: float) -> tuple[int, float]:
     if "height" in tags:
         try:
@@ -174,6 +294,15 @@ def place_buildings(
     placed_polys: list[Polygon] = []   # for overlap dedupe
     road_lines = _build_road_lines(osm, cx_world, cy_world)
 
+    # Pre-compute settlement zones (one-time cost)
+    industrial_zone = _build_zone_polygons(osm, cx_world, cy_world,
+                                           {"industrial", "construction"})
+    commercial_zone = _build_zone_polygons(osm, cx_world, cy_world,
+                                           {"commercial", "retail"})
+    residential_zone = _build_zone_polygons(osm, cx_world, cy_world,
+                                            {"residential"})
+    all_centres = _building_centres(osm, cx_world, cy_world)
+
     for way in osm.ways:
         tags = way.get("tags") or {}
         if "building" not in tags:
@@ -218,6 +347,12 @@ def place_buildings(
         placed_polys.append(poly)
 
         btype = _infer_type(tags)
+        # Apply settlement-context remap: e.g. residential + town_centre
+        # becomes "apartment" so we get the multi-storey placeholder.
+        settlement = _classify_settlement(cx_local, cy_local,
+                                         industrial_zone, commercial_zone,
+                                         residential_zone, all_centres)
+        btype = _remap_type(btype, settlement)
         levels, height = _infer_levels_and_height(tags, poly.area)
         seed = int(way["id"])
         asset = provider.get_building(
