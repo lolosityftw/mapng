@@ -20,7 +20,7 @@ from typing import Iterable
 
 import numpy as np
 from pyproj import Transformer
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Point, Polygon
 
 from mapng_ai.assets.base import AssetProvider, BuildingAsset
 from mapng_ai.pipeline.region import Region, sample_terrain_height as _z_at
@@ -88,6 +88,79 @@ def _infer_levels_and_height(tags: dict, footprint_m2: float) -> tuple[int, floa
 # `_z_at` is the canonical height sampler from region.py (imported above).
 
 
+# OSM highway types we use for "nearest road alignment"
+_ROAD_HIGHWAYS = {
+    "primary", "secondary", "tertiary", "unclassified",
+    "residential", "living_street", "service", "lane", "track",
+}
+
+# Buildings closer than this metres to a road get their long axis
+# aligned to the road tangent. Beyond this they keep their OSM yaw.
+_ROAD_ALIGN_RADIUS_M = 40.0
+
+
+def _build_road_lines(osm, cx_world: float, cy_world: float) -> list[LineString]:
+    """Project OSM road centrelines into terrain-local coords.
+    Used to find each building's nearest road for orientation alignment."""
+    from mapng_ai.sources.overpass import way_line_ll as _way_line_ll
+    lines: list[LineString] = []
+    for w in osm.ways:
+        tags = w.get("tags") or {}
+        if tags.get("highway") not in _ROAD_HIGHWAYS:
+            continue
+        line_ll = _way_line_ll(w, osm.nodes)
+        if not line_ll or len(line_ll) < 2:
+            continue
+        try:
+            lon, lat = zip(*line_ll)
+            xs, ys = _LL_TO_ITM.transform(list(lon), list(lat))
+            xs_local = [x - cx_world for x in xs]
+            ys_local = [y - cy_world for y in ys]
+            ls = LineString(zip(xs_local, ys_local))
+            if not ls.is_empty and ls.length > 1.0:
+                lines.append(ls)
+        except Exception:
+            continue
+    return lines
+
+
+def _nearest_road_yaw(pt: Point, roads: list[LineString],
+                     fallback_yaw: float, max_dist_m: float = _ROAD_ALIGN_RADIUS_M) -> float:
+    """Find the nearest road segment within max_dist; return the yaw of
+    its tangent direction at the closest point. Falls back to OSM yaw
+    if no road is close enough.
+
+    The returned yaw aligns a building's LONG axis along the road —
+    which is what we want for European villages where houses line the
+    road, parallel to it. We also flip 180° if needed so the building
+    "faces" the same general direction as adjacent buildings would.
+    """
+    if not roads:
+        return fallback_yaw
+    nearest = None
+    min_d = float("inf")
+    for road in roads:
+        d = road.distance(pt)
+        if d < min_d:
+            min_d = d
+            nearest = road
+    if nearest is None or min_d > max_dist_m:
+        return fallback_yaw
+    try:
+        # Sample tangent: project, then take points slightly before/after
+        proj = nearest.project(pt)
+        L = nearest.length
+        d1 = max(0.0, proj - 0.5)
+        d2 = min(L, proj + 0.5)
+        if d2 - d1 < 1e-6:
+            return fallback_yaw
+        p0 = nearest.interpolate(d1)
+        p1 = nearest.interpolate(d2)
+        return float(np.arctan2(p1.y - p0.y, p1.x - p0.x))
+    except Exception:
+        return fallback_yaw
+
+
 def place_buildings(
     osm: OSMData,
     region: Region,
@@ -99,6 +172,7 @@ def place_buildings(
     cy_world = (region.working_itm.south + region.working_itm.north) / 2
     half = region.side_m / 2
     placed_polys: list[Polygon] = []   # for overlap dedupe
+    road_lines = _build_road_lines(osm, cx_world, cy_world)
 
     for way in osm.ways:
         tags = way.get("tags") or {}
@@ -168,11 +242,25 @@ def place_buildings(
         target_scale = max(length / max(nat_l, 1e-3), width / max(nat_w, 1e-3))
         target_scale = max(0.6, min(1.4, target_scale))
         scale_xyz = (length * sj, width * sj, height * szj)
-        # Sample terrain height at the building's 4 corners and use the
-        # MIN — that way the lowest corner sits at terrain level and the
-        # rest bury slightly into uphill ground (instead of any corner
-        # floating). Then drop another 0.3m so a small foundation is
-        # always buried, hiding the seam.
+
+        # Re-orient so the building's long axis is parallel to the
+        # nearest road. NI (and most European) villages have houses
+        # lining the road parallel to it — this looks much cleaner than
+        # blindly using whatever angle OSM has tagged. Buildings >40m
+        # from any road keep their OSM yaw (rural barns/sheds at random
+        # field angles).
+        building_centre = Point(cx_local, cy_local)
+        aligned_yaw = _nearest_road_yaw(building_centre, road_lines,
+                                        fallback_yaw=yaw)
+        # Pick whichever 90° rotation of `aligned_yaw` is closer to the
+        # OSM yaw — that way "long-axis along road" is preserved but
+        # we don't flip a building 90° when OSM had it perpendicular.
+        candidates = [aligned_yaw, aligned_yaw + np.pi / 2]
+        def _angle_diff(a, b):
+            d = (a - b + np.pi) % (2 * np.pi) - np.pi
+            return abs(d)
+        yaw = min(candidates, key=lambda c: _angle_diff(c, yaw))
+
         cos_y, sin_y = np.cos(yaw), np.sin(yaw)
         hl, hw = length * 0.5, width * 0.5
         corners = [(hl, hw), (hl, -hw), (-hl, hw), (-hl, -hw)]
