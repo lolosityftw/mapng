@@ -1,376 +1,421 @@
-"""Extract vanilla BeamNG TerrainMaterial pack into a mod.
+"""Vanilla BeamNG terrain pack — port of nikkiluzader/mapng's approach.
 
-Why this exists: BeamNG forum guidance is unambiguous — to use stock terrain
-materials in a mod, you must COPY the texture files into your mod's art
-folder and edit the material paths to fit your folder structure. You cannot
-just reference /levels/industrial/... from a mod context (the textures
-won't be found at terrain init time).
+Key insight from the working reference (services/osmTerrainMaterials.js):
 
-What this does:
-  1. Locates Industrial.zip + content/assets/materials/terrain.zip
-  2. Reads the materials we want for our 8 land classes
-  3. For each texture path, finds the actual PNG bytes by:
-       - reading directly from Industrial.zip if a real .png is present
-       - else following the .png.link redirect into terrain.zip
-  4. Bundles ALL textures into our mod at /levels/{our_level}/art/terrains/
-     and rewrites every material path to point there. We do NOT rely on
-     /assets/materials/terrain/... being mounted in the mod's VFS context
-     (empirically that fails with "Material X is missing texture").
-  5. Returns (materials_dict, files_to_bundle) ready to ship
+  1. Don't bundle vanilla textures into our mod. Reference them via their
+     real VFS paths (`/levels/east_coast_usa/art/terrains/...`). BeamNG
+     mounts every vanilla level zip at startup so those paths resolve.
+
+  2. Override ONLY the base slots in each cloned vanilla material — point
+     baseColorBaseTex at our satellite composite, point base-AO/normal/
+     roughness/height at small SHARED NEUTRAL textures we generate.
+     Keep the detail/macro slots pointing at the original vanilla paths
+     so the close-range PBR look stays intact.
+
+  3. The TerrainMaterialTextureSet's baseTexSize must match the actual
+     pixel dimensions of the satellite composite (typically 2048).
+
+  4. Material dict keys follow vanilla format: `{InternalName}-{uuid}`,
+     and `name` is set to the same value.
+
+REFERENCE_MATERIALS templates below are clones of vanilla TerrainMaterials
+from East Coast USA / GridMap v2 / Utah — picked for the rural look that
+fits NI countryside.
 """
 from __future__ import annotations
 
-import json
+import io
 import uuid
-import zipfile
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import numpy as np
+from PIL import Image
 
-# Land class → vanilla internalName. We prefer Italy's terrain pack —
-# it's a Mediterranean countryside level with 4 grass variants, weathered
-# rural roads, dirt tracks, and forest_floor — much closer match to NI
-# rural villages than Industrial (which is a race-track / concrete yard).
-# Falls back to Industrial materials if Italy isn't installed.
-CLASS_TO_ITALY: Dict[str, str] = {
-    "asphalt":  "groundmodel_asphalt1",  # main rural roads
-    "concrete": "asphalt2",              # weathered/cracked asphalt — closest to NI village concrete
-    "lawn":     "Grass3",                # vivid managed lawn
-    "pasture":  "Grass2",                # rougher pasture green
-    "earth":    "dirt_loose",            # unpaved farm tracks
-    "gravel":   "RockyDirt",             # gravel/rocky tracks
-    "water":    "BeachSand",             # WaterPlane handles actual water
-    "forest":   "forest_floor",          # leaf litter / woodland
+
+# ----------------------------------------------------------------------------
+# Reference templates — mirrored from nikkiluzader/mapng's REFERENCE_MATERIALS
+# (services/osmTerrainMaterials.js). Each template has the full PBR field
+# set; we'll override the base slots when cloning.
+# ----------------------------------------------------------------------------
+
+_TEMPLATE_GRASS = {
+    "class": "TerrainMaterial",
+    "annotation": "GRASS",
+    "aoBaseTex":   "/levels/east_coast_usa/art/terrains/t_terrain_base_ao.png",
+    "aoBaseTexSize": 2048,
+    "aoDetailTex": "/levels/east_coast_usa/art/terrains/t_grass1_ao.png",
+    "aoMacroTex":  "/levels/east_coast_usa/art/terrains/t_macro_grass_ao.png",
+    "aoMacroTexSize": 100,
+    "baseColorBaseTex":     "/levels/east_coast_usa/art/terrains/t_terrain_base_b.png",
+    "baseColorBaseTexSize": 2048,
+    "baseColorDetailStrength": [0.32, 0.0],
+    "baseColorDetailTex":   "/levels/east_coast_usa/art/terrains/t_grass1_b.png",
+    "baseColorMacroStrength":[0.10, 0.40],
+    "baseColorMacroTex":    "/levels/east_coast_usa/art/terrains/t_macro_grass_b.png",
+    "baseColorMacroTexSize": 100,
+    "detailDistAtten":  [0.0, 0.9],
+    "detailDistances":  [0, 0, 30, 60],
+    "groundmodelName":  "GRASS",
+    "heightBaseTex":    "/levels/east_coast_usa/art/terrains/t_terrain_base_h.png",
+    "heightBaseTexSize":2048,
+    "heightDetailTex":  "/levels/east_coast_usa/art/terrains/t_grass1_h.png",
+    "heightMacroTex":   "/levels/east_coast_usa/art/terrains/t_macro_grass_h.png",
+    "heightMacroTexSize": 100,
+    "macroDistAtten":   [0.35, 0.0],
+    "macroDistances":   [0, 0, 400, 8000],
+    "normalBaseTex":    "/levels/east_coast_usa/art/terrains/t_terrain_base_nm.png",
+    "normalBaseTexSize":2048,
+    "normalDetailStrength": [0.6, 0.0],
+    "normalDetailTex":  "/levels/east_coast_usa/art/terrains/t_grass1_nm.png",
+    "normalMacroStrength": [0.4, 0.6],
+    "normalMacroTex":   "/levels/east_coast_usa/art/terrains/t_macro_grass_nm.png",
+    "normalMacroTexSize": 100,
+    "roughnessBaseTex": "/levels/east_coast_usa/art/terrains/t_terrain_base_r.png",
+    "roughnessBaseTexSize": 2048,
+    "roughnessDetailStrength": [0.9, 0.0],
+    "roughnessDetailTex":   "/levels/east_coast_usa/art/terrains/t_grass1_r.png",
+    "roughnessMacroStrength":[0.2, 0.5],
+    "roughnessMacroTex":   "/levels/east_coast_usa/art/terrains/t_macro_grass_r.png",
+    "roughnessMacroTexSize": 100,
 }
 
-CLASS_TO_INDUSTRIAL: Dict[str, str] = {
-    "asphalt":  "groundmodel_asphalt1",
-    "concrete": "Concrete",
-    "lawn":     "Grass3",
-    "pasture":  "Grass2",
-    "earth":    "dirt",
-    "gravel":   "Gravel",
-    "water":    "BeachSand",
-    "forest":   "forest_floor",
+_TEMPLATE_DIRT = {
+    "class": "TerrainMaterial",
+    "aoBaseTex":   "/levels/gridmap_v2/art/terrains/t_terrain_base_ao.png",
+    "aoBaseTexSize": 2048,
+    "aoDetailTex": "/levels/gridmap_v2/art/terrains/t_dirt_loose_ao.png",
+    "aoMacroTex":  "/levels/gridmap_v2/art/terrains/t_macro_rocky_ao.png",
+    "baseColorBaseTex":     "/levels/gridmap_v2/art/terrains/t_terrain_base_b.png",
+    "baseColorBaseTexSize": 2048,
+    "baseColorDetailStrength": [0.25, 0.25],
+    "baseColorDetailTex":   "/levels/gridmap_v2/art/terrains/t_dirt_loose_b.png",
+    "baseColorMacroStrength":[0.10, 0.20],
+    "baseColorMacroTex":    "/levels/gridmap_v2/art/terrains/t_macro_rocky_b.png",
+    "detailSize": 2,
+    "detailStrength": 0.5,
+    "diffuseSize": 50,
+    "groundmodelName": "DIRT",
+    "heightBaseTex":    "/levels/gridmap_v2/art/terrains/t_terrain_base_h.png",
+    "heightBaseTexSize":2048,
+    "heightDetailTex":  "/levels/gridmap_v2/art/terrains/t_dirt_loose_h.png",
+    "heightMacroTex":   "/levels/gridmap_v2/art/terrains/t_macro_rocky_h.png",
+    "macroDistance": 1000,
+    "macroDistances":[0, 10, 100, 3000],
+    "macroSize": 40,
+    "macroStrength": 0.5,
+    "normalBaseTex":    "/levels/gridmap_v2/art/terrains/t_terrain_base_nm.png",
+    "normalBaseTexSize":2048,
+    "normalDetailStrength": [0.7, 0.15],
+    "normalDetailTex":  "/levels/gridmap_v2/art/terrains/t_dirt_loose_nm.png",
+    "normalMacroStrength": [0.30, 0.40],
+    "normalMacroTex":   "/levels/gridmap_v2/art/terrains/t_macro_rocky_nm.png",
+    "roughnessBaseTex": "/levels/gridmap_v2/art/terrains/t_terrain_base_r.png",
+    "roughnessBaseTexSize": 2048,
+    "roughnessDetailStrength": [0.3, 0.3],
+    "roughnessDetailTex":   "/levels/gridmap_v2/art/terrains/t_dirt_loose_r.png",
+    "roughnessMacroStrength":[0.20, 0.70],
+    "roughnessMacroTex":   "/levels/gridmap_v2/art/terrains/t_macro_rocky_r.png",
+}
+
+_TEMPLATE_BEACHSAND = {
+    "class": "TerrainMaterial",
+    "annotation": "SAND",
+    "aoBaseTex":   "/levels/gridmap_v2/art/terrains/t_terrain_base_ao.png",
+    "aoBaseTexSize": 2048,
+    "aoDetailTex": "/levels/gridmap_v2/art/terrains/t_beachsand_ao.png",
+    "aoMacroTex":  "/levels/gridmap_v2/art/terrains/t_macro_clumpy_ao.png",
+    "baseColorBaseTex":     "/levels/gridmap_v2/art/terrains/t_terrain_base_b.png",
+    "baseColorBaseTexSize": 2048,
+    "baseColorDetailStrength": [0.25, 0.25],
+    "baseColorDetailTex":   "/levels/gridmap_v2/art/terrains/t_beachsand_b.png",
+    "baseColorMacroStrength":[0.05, 0.10],
+    "baseColorMacroTex":    "/levels/gridmap_v2/art/terrains/t_macro_clumpy_b.png",
+    "detailSize": 2, "detailStrength": 0.5, "diffuseSize": 50,
+    "groundmodelName": "SAND",
+    "heightBaseTex":    "/levels/gridmap_v2/art/terrains/t_terrain_base_h.png",
+    "heightBaseTexSize":2048,
+    "heightDetailTex":  "/levels/gridmap_v2/art/terrains/t_beachsand_h.png",
+    "heightMacroTex":   "/levels/gridmap_v2/art/terrains/t_macro_clumpy_h.png",
+    "macroDistance": 1000, "macroDistances":[0, 10, 100, 3000],
+    "macroSize": 40, "macroStrength": 0.5,
+    "normalBaseTex":    "/levels/gridmap_v2/art/terrains/t_terrain_base_nm.png",
+    "normalBaseTexSize":2048,
+    "normalDetailStrength": [0.7, 0.15],
+    "normalDetailTex":  "/levels/gridmap_v2/art/terrains/t_beachsand_nm.png",
+    "normalMacroStrength": [0.25, 0.25],
+    "normalMacroTex":   "/levels/gridmap_v2/art/terrains/t_macro_clumpy_nm.png",
+    "roughnessBaseTex": "/levels/gridmap_v2/art/terrains/t_terrain_base_r.png",
+    "roughnessBaseTexSize": 2048,
+}
+
+_TEMPLATE_ROCK = {
+    "class": "TerrainMaterial",
+    "annotation": "ROCK",
+    "aoBaseTex":   "/levels/east_coast_usa/art/terrains/t_terrain_base_ao.png",
+    "aoBaseTexSize": 2048,
+    "aoDetailTex": "/levels/east_coast_usa/art/terrains/t_rock1_ao.png",
+    "baseColorBaseTex":     "/levels/east_coast_usa/art/terrains/t_terrain_base_b.png",
+    "baseColorBaseTexSize": 2048,
+    "baseColorDetailStrength": [0.5, 0.0],
+    "baseColorDetailTex":   "/levels/east_coast_usa/art/terrains/t_rock1_b.png",
+    "groundmodelName": "ROCK",
+    "heightBaseTex":    "/levels/east_coast_usa/art/terrains/t_terrain_base_h.png",
+    "heightBaseTexSize":2048,
+    "heightDetailTex":  "/levels/east_coast_usa/art/terrains/t_rock1_h.png",
+    "normalBaseTex":    "/levels/east_coast_usa/art/terrains/t_terrain_base_nm.png",
+    "normalBaseTexSize":2048,
+    "normalDetailStrength": [0.6, 0.0],
+    "normalDetailTex":  "/levels/east_coast_usa/art/terrains/t_rock1_nm.png",
+    "roughnessBaseTex": "/levels/east_coast_usa/art/terrains/t_terrain_base_r.png",
+    "roughnessBaseTexSize": 2048,
+    "roughnessDetailTex":   "/levels/east_coast_usa/art/terrains/t_rock1_r.png",
+}
+
+_TEMPLATE_ASPHALT = {
+    "class": "TerrainMaterial",
+    "annotation": "ASPHALT",
+    "aoBaseTex":   "/levels/east_coast_usa/art/terrains/t_terrain_base_ao.png",
+    "aoBaseTexSize": 2048,
+    "aoDetailTex": "/levels/east_coast_usa/art/terrains/t_asphalt_ao.png",
+    "baseColorBaseTex":     "/levels/east_coast_usa/art/terrains/t_terrain_base02_b.png",
+    "baseColorBaseTexSize": 2048,
+    "baseColorDetailStrength": [0.3, 0.1],
+    "baseColorDetailTex":   "/levels/east_coast_usa/art/terrains/t_asphalt_b.png",
+    "diffuseSize": 50,
+    "groundmodelName":  "ASPHALT",
+    "heightBaseTex":    "/levels/east_coast_usa/art/terrains/t_terrain_base_h.png",
+    "heightBaseTexSize":2048,
+    "heightDetailTex":  "/levels/east_coast_usa/art/terrains/t_asphalt_h.png",
+    "normalBaseTex":    "/levels/east_coast_usa/art/terrains/t_terrain_base_nm.png",
+    "normalBaseTexSize":2048,
+    "normalDetailStrength": [0.6, 0.0],
+    "normalDetailTex":  "/levels/east_coast_usa/art/terrains/t_asphalt_nm.png",
+    "roughnessBaseTex": "/levels/east_coast_usa/art/terrains/t_terrain_base_r.png",
+    "roughnessBaseTexSize": 2048,
+    "roughnessDetailTex":   "/levels/east_coast_usa/art/terrains/t_asphalt_r.png",
+}
+
+_TEMPLATE_GRAVEL = {
+    "class": "TerrainMaterial",
+    "annotation": "GRAVEL",
+    "aoBaseTex":   "/levels/Utah/art/terrains/t_terrain_base_ao.png",
+    "aoBaseTexSize": 2048,
+    "aoDetailTex": "/levels/Utah/art/terrains/t_dirt_rocky_ao.png",
+    "baseColorBaseTex":     "/levels/Utah/art/terrains/t_terrain_base_b.png",
+    "baseColorBaseTexSize": 2048,
+    "baseColorDetailStrength": [0.4, 0.1],
+    "baseColorDetailTex":   "/levels/Utah/art/terrains/t_dirt_rocky_b.png",
+    "diffuseSize": 50,
+    "groundmodelName":  "GRAVEL",
+    "heightBaseTex":    "/levels/Utah/art/terrains/t_terrain_base_h.png",
+    "heightBaseTexSize":2048,
+    "heightDetailTex":  "/levels/Utah/art/terrains/t_dirt_rocky_h.png",
+    "normalBaseTex":    "/levels/Utah/art/terrains/t_terrain_base_nm.png",
+    "normalBaseTexSize":2048,
+    "normalDetailTex":  "/levels/Utah/art/terrains/t_dirt_rocky_nm.png",
+    "roughnessBaseTex": "/levels/Utah/art/terrains/t_terrain_base_r.png",
+    "roughnessBaseTexSize": 2048,
+    "roughnessDetailTex":   "/levels/Utah/art/terrains/t_dirt_rocky_r.png",
+}
+
+_TEMPLATE_CONCRETE = {
+    "class": "TerrainMaterial",
+    "annotation": "CONCRETE",
+    "aoBaseTex":   "/levels/gridmap_v2/art/terrains/t_terrain_base_ao.png",
+    "aoBaseTexSize": 2048,
+    "aoDetailTex": "/levels/gridmap_v2/art/terrains/t_concrete_damaged_ao.png",
+    "baseColorBaseTex":     "/levels/gridmap_v2/art/terrains/t_terrain_base_b.png",
+    "baseColorBaseTexSize": 2048,
+    "baseColorDetailStrength": [0.3, 0.1],
+    "baseColorDetailTex":   "/levels/gridmap_v2/art/terrains/t_concrete_damaged_b.png",
+    "diffuseSize": 50,
+    "groundmodelName":  "CONCRETE",
+    "heightBaseTex":    "/levels/gridmap_v2/art/terrains/t_terrain_base_h.png",
+    "heightBaseTexSize":2048,
+    "heightDetailTex":  "/levels/gridmap_v2/art/terrains/t_concrete_damaged_h.png",
+    "normalBaseTex":    "/levels/gridmap_v2/art/terrains/t_terrain_base_nm.png",
+    "normalBaseTexSize":2048,
+    "normalDetailTex":  "/levels/gridmap_v2/art/terrains/t_concrete_damaged_nm.png",
+    "roughnessBaseTex": "/levels/gridmap_v2/art/terrains/t_terrain_base_r.png",
+    "roughnessBaseTexSize": 2048,
+    "roughnessDetailTex":   "/levels/gridmap_v2/art/terrains/t_concrete_damaged_r.png",
 }
 
 
-# All texture-pointing field names in BeamNG TerrainMaterial JSON.
-_TEX_FIELDS = (
-    "diffuseMap", "detailMap", "macroMap",
-    "normalMap", "normalDetailMap", "normalMacroMap",
-    "baseColorBaseTex", "baseColorDetailTex", "baseColorMacroTex",
-    "normalBaseTex", "normalDetailTex", "normalMacroTex",
-    "roughnessBaseTex", "roughnessDetailTex", "roughnessMacroTex",
-    "aoBaseTex", "aoDetailTex", "aoMacroTex",
-    "heightBaseTex", "heightDetailTex", "heightMacroTex",
-    "specularMap",
-)
+# Mapping: our class key → (internalName, template). DefaultMaterial added separately.
+_CLASS_TO_TEMPLATE: Dict[str, Tuple[str, Dict]] = {
+    "asphalt":  ("asphalt",   _TEMPLATE_ASPHALT),
+    "concrete": ("Concrete",  _TEMPLATE_CONCRETE),
+    "lawn":     ("Grass",     _TEMPLATE_GRASS),
+    "pasture":  ("Grass",     _TEMPLATE_GRASS),
+    "earth":    ("Dirt",      _TEMPLATE_DIRT),
+    "gravel":   ("GRAVEL",    _TEMPLATE_GRAVEL),
+    "water":    ("BeachSand", _TEMPLATE_BEACHSAND),
+    "forest":   ("Grass",     _TEMPLATE_GRASS),  # forest_floor not stable enough cross-level
+}
 
 
-def _candidate_install_bases() -> List[Path]:
-    """Common BeamNG install locations."""
-    drives = ["C:", "D:", "E:", "F:"]
-    bases = [
-        "/SteamLibrary/steamapps/common/BeamNG.drive",
-        "/Program Files (x86)/Steam/steamapps/common/BeamNG.drive",
-        "/Program Files/Steam/steamapps/common/BeamNG.drive",
-        "/Games/BeamNG.drive",
-    ]
-    out: List[Path] = []
-    for drv in drives:
-        for base in bases:
-            out.append(Path(drv + base))
-    return out
+# ----------------------------------------------------------------------------
+# Shared neutral textures (small, written once per export)
+# ----------------------------------------------------------------------------
+
+def _white_ao_png(size: int) -> bytes:
+    """Pure-white ambient occlusion (no occlusion baked in)."""
+    img = Image.new("L", (size, size), 255)
+    buf = io.BytesIO(); img.save(buf, format="PNG"); return buf.getvalue()
 
 
-def find_level_zip(level_zip_name: str, override: Path | str | None = None) -> Path | None:
-    """Locate a vanilla level zip (e.g. 'italy.zip', 'Industrial.zip')."""
-    if override is not None:
-        p = Path(override)
-        return p if p.is_file() else None
-    for base in _candidate_install_bases():
-        p = base / "content" / "levels" / level_zip_name
-        try:
-            if p.is_file():
-                return p
-        except OSError:
-            continue
-    return None
+def _flat_normal_png(size: int) -> bytes:
+    """Flat normal map: RGB(128, 128, 255) — perfect 'no bump' surface."""
+    arr = np.full((size, size, 3), [128, 128, 255], dtype=np.uint8)
+    img = Image.fromarray(arr)
+    buf = io.BytesIO(); img.save(buf, format="PNG"); return buf.getvalue()
 
 
-def find_industrial_zip(override: Path | str | None = None) -> Path | None:
-    return find_level_zip("Industrial.zip", override)
+def _neutral_roughness_png(size: int, value: int = 180) -> bytes:
+    """Mid-roughness greyscale (180 = slightly glossy, default for terrain)."""
+    img = Image.new("L", (size, size), value)
+    buf = io.BytesIO(); img.save(buf, format="PNG"); return buf.getvalue()
 
 
-def find_italy_zip(override: Path | str | None = None) -> Path | None:
-    # Italy is named lowercase in some installs
-    p = find_level_zip("italy.zip", override)
-    if p is not None:
-        return p
-    return find_level_zip("Italy.zip", override)
+# ----------------------------------------------------------------------------
+# Build terrain pack
+# ----------------------------------------------------------------------------
+
+def _stable_uuid(seed: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"mapng:{seed}"))
 
 
-def find_terrain_assets_zip(level_zip: Path) -> Path | None:
-    """Locate the central terrain.zip relative to a level zip path."""
-    base = level_zip.parent.parent  # .../content
-    p = base / "assets" / "materials" / "terrain.zip"
-    return p if p.is_file() else None
+def texture_set_name(level_name: str) -> str:
+    """The TerrainMaterialTextureSet name — referenced by TerrainBlock."""
+    return f"{level_name}TerrainMaterialTextureSet"
 
 
-def _build_redirect_map(zf: zipfile.ZipFile) -> Dict[str, str]:
-    """Read every *.png.link file in the zip and map logical→real paths."""
-    redirects: Dict[str, str] = {}
-    for name in zf.namelist():
-        if not name.endswith(".png.link"):
-            continue
-        try:
-            d = json.loads(zf.read(name))
-        except (json.JSONDecodeError, KeyError):
-            continue
-        # Logical path is "/<name without .link>" with case preserved as in
-        # the materials.json (Industrial uses lowercase 'industrial' in
-        # texture refs but uppercase 'Industrial' in zip member names).
-        logical = "/" + name[:-5]
-        target = d.get("path", "")
-        if target:
-            # Index by both lowercase logical and the actual case
-            redirects[logical.lower()] = target
-            redirects[logical] = target
-    return redirects
+def class_to_internal_name(level_name: str, cls_key: str) -> str | None:
+    """Match the prefixed internalName our pack uses for a class key.
 
-
-def _find_member_ci(zf: zipfile.ZipFile, path: str) -> str | None:
-    """Case-insensitive zip member lookup."""
-    target = path.lower()
-    for member in zf.namelist():
-        if member.lower() == target:
-            return member
-    return None
-
-
-def _resolve_texture_bytes(
-    tex_path: str,
-    industrial_zf: zipfile.ZipFile,
-    industrial_redirects: Dict[str, str],
-    terrain_zf: zipfile.ZipFile | None,
-) -> bytes | None:
-    """Find and return the actual PNG bytes for a texture path.
-
-    Resolution order:
-      1. If the path exists as a real .png in Industrial.zip, read it
-      2. If a .png.link exists, follow the redirect into terrain.zip
-      3. Try terrain.zip directly (for /assets/... paths)
-      Returns None if nothing found.
+    The pack uses semantic names ("Grass", "Dirt", etc.) so multiple
+    classes can map to the same TerrainMaterial. The .ter binary stores
+    one entry per LAYER (one per splat.layers item), which can repeat
+    the same internalName.
     """
-    # 1. Real PNG in Industrial.zip
-    src_logical = tex_path.lstrip("/")
-    member = _find_member_ci(industrial_zf, src_logical)
-    if member is not None:
-        return industrial_zf.read(member)
-
-    # 2. Follow .png.link redirect
-    target = (industrial_redirects.get(tex_path)
-              or industrial_redirects.get(tex_path.lower()))
-    if target and terrain_zf is not None:
-        target_logical = target.lstrip("/")
-        member = _find_member_ci(terrain_zf, target_logical)
-        if member is not None:
-            return terrain_zf.read(member)
-
-    # 3. Direct lookup in terrain.zip (for paths already in /assets/ form)
-    if terrain_zf is not None:
-        member = _find_member_ci(terrain_zf, src_logical)
-        if member is not None:
-            return terrain_zf.read(member)
-
-    return None
+    entry = _CLASS_TO_TEMPLATE.get(cls_key)
+    if entry is None:
+        return None
+    return entry[0]
 
 
 def build_vanilla_terrain_pack(
     level_name: str,
     classes_used: List[str],
-    industrial_zip: Path | None = None,
+    industrial_zip: Path | None = None,  # legacy, unused
     side_m: float = 1024.0,
-    source: str = "italy",  # "italy" or "industrial" — Italy is rural Mediterranean countryside (best fit for NI villages)
+    source: str = "italy",                 # legacy, unused (we hardcode templates)
 ) -> Tuple[Dict[str, dict], List[Tuple[str, bytes]]] | None:
-    """Build a vanilla terrain material pack for the given list of class keys.
+    """Build the terrain materials.json + companion shared textures.
 
-    Bundles all texture files into our mod (both level-local PNGs and
-    redirected /assets/... PNGs from terrain.zip).
+    Mirrors nikkiluzader/mapng's `buildTerrainMaterials` exactly:
+      - 1 TerrainMaterialTextureSet
+      - 1 DefaultMaterial (semantic name, satellite base, neutral other channels)
+      - N cloned TerrainMaterials (one per unique class), with base slots
+        overridden to satellite + shared neutrals; detail/macro slots keep
+        their vanilla VFS paths so PBR detail layers work
+      - 6 small shared neutral PNGs to bundle (white AO, flat normal, mid roughness;
+        at base size and detail size = 1024)
 
-    source: which vanilla level to clone materials from. Italy is the
-    default — its 4 grass variants and weathered rural roads match NI
-    countryside much better than Industrial's race-track materials.
+    Returns: (materialDefs dict, files-to-bundle list of (relpath, bytes))
     """
-    # Pick source level
-    if source == "italy":
-        src_zip = find_italy_zip()
-        members = ("levels/italy/art/terrains/main.materials.json",
-                   "levels/Italy/art/terrains/main.materials.json")
-        class_map = CLASS_TO_ITALY
-    else:
-        src_zip = industrial_zip or find_industrial_zip()
-        members = ("levels/Industrial/art/terrains/main.materials.json",
-                   "levels/industrial/art/terrains/main.materials.json")
-        class_map = CLASS_TO_INDUSTRIAL
+    BASE_SIZE = 2048   # matches our composite (terrain.png) size
+    DETAIL_SIZE = 1024 # detail/macro neutral fallbacks
 
-    # Italy fallback to Industrial if Italy not installed
-    if src_zip is None and source == "italy":
-        src_zip = find_industrial_zip()
-        members = ("levels/Industrial/art/terrains/main.materials.json",
-                   "levels/industrial/art/terrains/main.materials.json")
-        class_map = CLASS_TO_INDUSTRIAL
+    materials: Dict[str, dict] = {}
+    files: List[Tuple[str, bytes]] = []
 
-    if src_zip is None:
-        return None
-    terrain_zip = find_terrain_assets_zip(src_zip)
+    # Shared neutral textures — only 6 small PNGs total (much smaller than
+    # bundling Industrial's 75 textures)
+    files.extend([
+        (f"levels/{level_name}/art/terrains/shared_ao.png",    _white_ao_png(BASE_SIZE)),
+        (f"levels/{level_name}/art/terrains/shared_nm.png",    _flat_normal_png(BASE_SIZE)),
+        (f"levels/{level_name}/art/terrains/shared_r.png",     _neutral_roughness_png(BASE_SIZE)),
+        (f"levels/{level_name}/art/terrains/shared_ao_sm.png", _white_ao_png(DETAIL_SIZE)),
+        (f"levels/{level_name}/art/terrains/shared_nm_sm.png", _flat_normal_png(DETAIL_SIZE)),
+        (f"levels/{level_name}/art/terrains/shared_r_sm.png",  _neutral_roughness_png(DETAIL_SIZE)),
+    ])
 
-    try:
-        izf = zipfile.ZipFile(src_zip, "r")
-    except (zipfile.BadZipFile, OSError):
-        return None
-    tzf = None
-    if terrain_zip is not None:
-        try:
-            tzf = zipfile.ZipFile(terrain_zip, "r")
-        except (zipfile.BadZipFile, OSError):
-            tzf = None
+    # ── TerrainMaterialTextureSet ────────────────────────────────────────────
+    ts_name = texture_set_name(level_name)
+    materials[ts_name] = {
+        "name": ts_name,
+        "class": "TerrainMaterialTextureSet",
+        "persistentId": _stable_uuid(f"textureset:{level_name}"),
+        "baseTexSize":   [BASE_SIZE, BASE_SIZE],
+        "detailTexSize": [DETAIL_SIZE, DETAIL_SIZE],
+        "macroTexSize":  [DETAIL_SIZE, DETAIL_SIZE],
+    }
 
-    try:
-        mats_raw = None
-        for member_path in members:
-            try:
-                mats_raw = json.loads(izf.read(member_path))
-                break
-            except KeyError:
-                continue
-        if mats_raw is None:
-            return None
+    # Helper: paths inside our level for shared neutrals + satellite
+    p = lambda f: f"/levels/{level_name}/art/terrains/{f}"
+    satellite = p("terrain.png")
 
-        redirects = _build_redirect_map(izf)
-
-        wanted_internal: Dict[str, str] = {}
-        for cls_key in classes_used:
-            iname = class_map.get(cls_key)
-            if iname:
-                wanted_internal[cls_key] = iname
-
-        by_internal: Dict[str, dict] = {}
-        for k, v in mats_raw.items():
-            inner = v.get("internalName")
-            if inner:
-                by_internal[inner] = v
-
-        out_materials: Dict[str, dict] = {}
-        bundle_files: Dict[str, bytes] = {}
-        our_terrain_dir = f"/levels/{level_name}/art/terrains"
-
-        # ---- TerrainMaterialTextureSet ----
-        # PBR TerrainMaterials REQUIRE a companion TerrainMaterialTextureSet
-        # object that defines the base/detail/macro atlas sizes. Without it
-        # BeamNG silently fails to bind textures even though the material
-        # itself loads — you get "Material X is missing texture" forever.
-        # We clone Industrial's textureSet, give it a unique name + UUID,
-        # and reference it from the TerrainBlock via materialTextureSet.
-        ts_pid = str(uuid.uuid5(
-            uuid.NAMESPACE_URL, f"mapng:terrain_textureset:{level_name}"
-        ))
-        ts_name = f"MapNG_terrainTextureSet_{level_name}"
-        # Pull from Industrial's textureSet if present, else use 1024 defaults
-        ts_template = None
-        for k, v in mats_raw.items():
-            if v.get("class") == "TerrainMaterialTextureSet":
-                ts_template = v
-                break
-        # Our terrain.png is the satellite/OSM composite — typically 2048×2048.
-        # Override the TextureSet's base size to match (Industrial uses 1024×1024
-        # because its base textures are 1024 pixels; ours are bigger).
-        texture_set = {
-            "name": ts_name,
-            "class": "TerrainMaterialTextureSet",
-            "persistentId": ts_pid,
-            "baseTexSize":   [2048, 2048],
-            "detailTexSize": ts_template["detailTexSize"] if ts_template else [1024, 1024],
-            "macroTexSize":  ts_template["macroTexSize"]  if ts_template else [1024, 1024],
+    def neutral_base_overrides() -> dict:
+        return {
+            "aoBaseTex":         p("shared_ao.png"),    "aoBaseTexSize":        BASE_SIZE,
+            "normalBaseTex":     p("shared_nm.png"),    "normalBaseTexSize":    BASE_SIZE,
+            "roughnessBaseTex":  p("shared_r.png"),     "roughnessBaseTexSize": BASE_SIZE,
+            "heightBaseTex":     p("shared_r.png"),     "heightBaseTexSize":    BASE_SIZE,
         }
-        out_materials[ts_name] = texture_set
 
-        for cls_key, iname in wanted_internal.items():
-            tmpl = by_internal.get(iname)
-            if tmpl is None:
-                continue
-            mat = dict(tmpl)
+    # ── DefaultMaterial (semantic name, no detail layer) ────────────────────
+    default_uuid = _stable_uuid(f"DefaultMaterial:{level_name}")
+    default_key = f"DefaultMaterial-{default_uuid}"
+    materials[default_key] = {
+        "name": default_key,
+        "class": "TerrainMaterial",
+        "persistentId": default_uuid,
+        "internalName": "DefaultMaterial",
+        "groundmodelName": "GROUNDMODEL_ASPHALT1",
+        "baseColorBaseTex": satellite,
+        "baseColorBaseTexSize": BASE_SIZE,
+        "diffuseSize": BASE_SIZE,
+        # Neutral overrides for detail/macro/etc. — DefaultMaterial is
+        # rendered for fill areas where we don't have a specific class
+        "baseColorDetailTex":   p("shared_r_sm.png"), "baseColorDetailStrength": [0, 0],
+        "baseColorMacroTex":    p("shared_r_sm.png"), "baseColorMacroStrength":  [0, 0],
+        "normalDetailTex":      p("shared_nm_sm.png"), "normalDetailStrength":   [0, 0],
+        "normalMacroTex":       p("shared_nm_sm.png"), "normalMacroStrength":    [0, 0],
+        "roughnessDetailTex":   p("shared_r_sm.png"), "roughnessDetailStrength": [0, 0],
+        "roughnessMacroTex":    p("shared_r_sm.png"), "roughnessMacroStrength":  [0, 0],
+        "aoDetailTex":          p("shared_ao_sm.png"),
+        "aoMacroTex":           p("shared_ao_sm.png"),
+        "heightDetailTex":      p("shared_r_sm.png"),
+        "heightMacroTex":       p("shared_r_sm.png"),
+        **neutral_base_overrides(),
+    }
 
-            new_internal = f"MapNG_{iname}"
-            mat["internalName"] = new_internal
-            pid = str(uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                f"mapng:terrain:{level_name}:{new_internal}",
-            ))
-            mat["persistentId"] = pid
-            # Keep Industrial's diffuseSize/detailSize/macroSize — those are
-            # tuned for the per-material textures we're now using as base.
+    # ── Cloned vanilla materials (one per unique class) ─────────────────────
+    seen_internals: set[str] = set()
+    for cls_key in classes_used:
+        entry = _CLASS_TO_TEMPLATE.get(cls_key)
+        if entry is None:
+            continue
+        internal_name, template = entry
+        if internal_name in seen_internals:
+            continue
+        seen_internals.add(internal_name)
 
-            for fk in _TEX_FIELDS:
-                tex_path = mat.get(fk)
-                if not isinstance(tex_path, str):
-                    continue
-                blob = _resolve_texture_bytes(tex_path, izf, redirects, tzf)
-                if blob is None:
-                    mat.pop(fk, None)
-                    continue
-                fname = tex_path.lstrip("/").rsplit("/", 1)[-1]
-                bundle_relpath = f"levels/{level_name}/art/terrains/{fname}"
-                if bundle_relpath not in bundle_files:
-                    bundle_files[bundle_relpath] = blob
-                mat[fk] = f"{our_terrain_dir}/{fname}"
+        muuid = _stable_uuid(f"{internal_name}:{level_name}")
+        mkey = f"{internal_name}-{muuid}"
+        # Deep-copy the template (shallow + fix lists)
+        mat = {k: (list(v) if isinstance(v, list) else v) for k, v in template.items()}
+        mat["name"] = mkey
+        mat["persistentId"] = muuid
+        mat["internalName"] = internal_name
+        # Override BASE slots to point at our composite + shared neutrals
+        mat["baseColorBaseTex"] = satellite
+        mat["baseColorBaseTexSize"] = BASE_SIZE
+        mat["diffuseSize"] = BASE_SIZE
+        mat.update(neutral_base_overrides())
+        materials[mkey] = mat
 
-            # Industrial's `t_terrain_base_b.png` is a RENDERED image of
-            # Industrial's actual level (race track, buildings, etc.) —
-            # NOT a generic tileable texture. Reusing it on our map shows
-            # Industrial's race track tiled.
-            #
-            # The PROPER BeamNG approach: each TerrainMaterial has its own
-            # distinct base texture matching that material's character
-            # (grass material → grass base, asphalt → asphalt base, etc.).
-            # The .ter layerMap tells BeamNG which material to render
-            # per-pixel; BeamNG blends between adjacent materials at
-            # boundaries. Detail and macro layers add close/mid-range
-            # variation on top of the per-material base.
-            #
-            # We achieve this by reusing the bundled per-material DETAIL
-            # texture as the BASE texture (it's already a tileable pattern
-            # of grass/asphalt/dirt/etc., and we already shipped it).
-            detail_tex = mat.get("baseColorDetailTex")
-            if isinstance(detail_tex, str):
-                mat["baseColorBaseTex"] = detail_tex
-                mat["baseColorBaseTexSize"] = mat.get("baseColorDetailTexSize", 1024)
-
-            out_materials[f"{new_internal}-{pid}"] = mat
-
-        files = [(p, b) for p, b in bundle_files.items()]
-        return out_materials, files
-    finally:
-        izf.close()
-        if tzf is not None:
-            tzf.close()
-
-
-def texture_set_name(level_name: str) -> str:
-    """Return the TerrainMaterialTextureSet name for this level (used by
-    the TerrainBlock's materialTextureSet field)."""
-    return f"MapNG_terrainTextureSet_{level_name}"
-
-
-def class_to_internal_name(level_name: str, cls_key: str, source: str = "italy") -> str | None:
-    """Return the prefixed internalName our vanilla pack uses for this class.
-
-    Used by the .ter writer to put the right material name in the binary.
-    Must match the source the pack was built from.
-    """
-    if source == "italy":
-        iname = CLASS_TO_ITALY.get(cls_key) or CLASS_TO_INDUSTRIAL.get(cls_key)
-    else:
-        iname = CLASS_TO_INDUSTRIAL.get(cls_key)
-    return f"MapNG_{iname}" if iname else None
+    return materials, files
