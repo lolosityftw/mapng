@@ -56,6 +56,26 @@ class DecalRoad:
 # `_z_at` is the canonical height sampler from region.py (imported above).
 
 
+def _trim_endpoints(nodes: list[tuple[float, float, float]], trim_m: float) -> list[tuple[float, float, float]]:
+    """Pull both ends of a polyline back by `trim_m` metres. Used to keep
+    DecalRoad endpoints from overlapping at junctions (each road shortens
+    away from the junction so the wider road's decal covers the gap)."""
+    if len(nodes) < 2 or trim_m <= 0:
+        return nodes
+    def _shift_along(p, q, dist):
+        # Move from p towards q by `dist` metres (or the full segment, whichever is shorter)
+        dx = q[0] - p[0]; dy = q[1] - p[1]
+        seg = (dx*dx + dy*dy) ** 0.5
+        if seg <= dist:
+            return q
+        t = dist / seg
+        return (p[0] + dx*t, p[1] + dy*t, p[2] + (q[2] - p[2])*t)
+    out = list(nodes)
+    out[0]  = _shift_along(out[0],  out[1],  trim_m)
+    out[-1] = _shift_along(out[-1], out[-2], trim_m)
+    return out
+
+
 def extract_decal_roads(osm: OSMData, region: Region, heightmap_m: np.ndarray) -> list[DecalRoad]:
     cx_world = (region.working_itm.west + region.working_itm.east) / 2
     cy_world = (region.working_itm.south + region.working_itm.north) / 2
@@ -92,6 +112,13 @@ def extract_decal_roads(osm: OSMData, region: Region, heightmap_m: np.ndarray) -
             width = max(width, 6.0)
             if len(nodes) > 2 and nodes[0] != nodes[-1]:
                 nodes.append(nodes[0])     # close the loop
+        else:
+            # Trim non-roundabout endpoints by half the road width so
+            # they don't physically overlap at junctions. Wider road's
+            # decal (higher renderPriority) covers the resulting gap.
+            nodes = _trim_endpoints(nodes, trim_m=width * 0.5)
+            if len(nodes) < 2:
+                continue
         out.append(DecalRoad(
             osm_id=int(w["id"]),
             name=tags.get("name", "roundabout" if is_round else "road"),

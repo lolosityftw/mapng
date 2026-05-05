@@ -433,9 +433,10 @@ def _decal_roads_objects(roads: Sequence[DecalRoad]) -> list[dict]:
             "renderPriority": priority,
             "breakAngle": 22,
             "distanceFade": [200, 50],
-            # Long alpha taper at each end → smooth blend at junctions
-            # (was [5, 5] which produced visible hard edges).
-            "startEndFade": [15, 15],
+            # Short alpha taper — long fades produce ghostly transparent
+            # ends. Junction tears are now handled by renderPriority
+            # (wider road draws on top) + endpoint trimming, not fade.
+            "startEndFade": [2, 2],
             "textureLength": 5.0 if is_drive else 12.0,
             "improvedSpline": True,
             "smoothness": 1.0,

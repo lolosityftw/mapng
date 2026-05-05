@@ -98,6 +98,7 @@ def place_buildings(
     cx_world = (region.working_itm.west + region.working_itm.east) / 2
     cy_world = (region.working_itm.south + region.working_itm.north) / 2
     half = region.side_m / 2
+    placed_polys: list[Polygon] = []   # for overlap dedupe
 
     for way in osm.ways:
         tags = way.get("tags") or {}
@@ -124,6 +125,24 @@ def place_buildings(
         if abs(cx_local) > half or abs(cy_local) > half:
             continue
 
+        # Skip buildings that significantly overlap one we already
+        # placed — OSM often has overlapping polygons (main + extension,
+        # or duplicate digitisations) that produce stacked buildings.
+        try:
+            skip = False
+            for prev in placed_polys:
+                if not poly.intersects(prev):
+                    continue
+                inter = poly.intersection(prev).area
+                if inter > 0.5 * min(poly.area, prev.area):
+                    skip = True
+                    break
+            if skip:
+                continue
+        except Exception:
+            pass
+        placed_polys.append(poly)
+
         btype = _infer_type(tags)
         levels, height = _infer_levels_and_height(tags, poly.area)
         seed = int(way["id"])
@@ -149,7 +168,20 @@ def place_buildings(
         target_scale = max(length / max(nat_l, 1e-3), width / max(nat_w, 1e-3))
         target_scale = max(0.6, min(1.4, target_scale))
         scale_xyz = (length * sj, width * sj, height * szj)
-        z = _z_at(heightmap_m, region.side_m, cx_local, cy_local)
+        # Sample terrain height at the building's 4 corners and use the
+        # MIN — that way the lowest corner sits at terrain level and the
+        # rest bury slightly into uphill ground (instead of any corner
+        # floating). Then drop another 0.3m so a small foundation is
+        # always buried, hiding the seam.
+        cos_y, sin_y = np.cos(yaw), np.sin(yaw)
+        hl, hw = length * 0.5, width * 0.5
+        corners = [(hl, hw), (hl, -hw), (-hl, hw), (-hl, -hw)]
+        z_samples = []
+        for lx, ly in corners:
+            wx = cx_local + cos_y * lx - sin_y * ly
+            wy = cy_local + sin_y * lx + cos_y * ly
+            z_samples.append(_z_at(heightmap_m, region.side_m, wx, wy))
+        z = min(z_samples) - 0.3
         placements.append(BuildingPlacement(
             osm_id=seed, asset=asset,
             x_m=cx_local, y_m=cy_local, z_m=z,

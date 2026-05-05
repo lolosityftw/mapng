@@ -28,10 +28,13 @@ from mapng_ai.sources.overpass import OSMData, way_line_ll, way_polygon_ll
 _LL_TO_ITM = Transformer.from_crs("EPSG:4326", "EPSG:2157", always_xy=True)
 
 
-# Hard caps so we never emit absurd numbers
-MAX_TREES = 4000
-MAX_HEDGE_SEGMENTS = 4000      # synthesised road hedges add lots
-TREES_PER_M2_FOREST = 0.035    # ~1 per 28 m²
+# Hard caps — tripled from previous values for better Orritor-Rd-style
+# rural density. Low-poly TSStatic count budget at these settings:
+#   12000 trees × 32 tris  + 16000 hedges × 12 tris + 2000 bushes × 8 tris
+#   ≈ 600k tris total — well within BeamNG's render budget.
+MAX_TREES = 12000
+MAX_HEDGE_SEGMENTS = 16000     # synthesised road hedges add lots
+TREES_PER_M2_FOREST = 0.05     # denser forests (was 0.035) — 1 per 20 m²
 HEDGE_SEGMENT_LEN_M = 4.0      # subdivide long hedges into ~4 m chunks
 
 # Highways that get synthesised hedges flanking them. Rural NI roads are
@@ -194,9 +197,11 @@ def add_garden_features(*, hedges: list, buildings, region: Region,
         # garden treatment so the world doesn't look uniform.
         if rng.random() > 0.70:
             continue
-        # Garden extent — extend ~6 m beyond the long axis of the house.
-        garden_l = sl + 12.0
-        garden_w = sw + 8.0
+        # Garden extent — keep tight to the house so walls don't poke
+        # through neighbouring buildings in tight terraced clusters.
+        # +4m on long axis (back garden), +3m on each side.
+        garden_l = sl + 4.0
+        garden_w = sw + 3.0
         cos_y = float(np.cos(b.yaw_rad))
         sin_y = float(np.sin(b.yaw_rad))
         # 4 wall segments forming a rectangle around the house (skipping
@@ -770,11 +775,11 @@ def place_foliage(osm: OSMData, region: Region, heightmap_m: np.ndarray, *,
 # ---------------------------------------------------------------------------
 
 # Tunables (kept low for performance — 8-tri bushes scale up to ~600 OK)
-_BUSH_FIELD_SPACING_M = 28.0   # Poisson r — sparse scatter in fields
-_BUSH_ROAD_SPACING_M  = 14.0   # along rural road edges
+_BUSH_FIELD_SPACING_M = 18.0   # Poisson r — denser scatter in fields (was 28)
+_BUSH_ROAD_SPACING_M  = 7.0    # along rural road edges (was 14)
 _BUSH_ROAD_OFFSET_M   = 1.8    # perpendicular distance from road centreline
 _BUSH_ROAD_GAP_DRIVEWAY_M = 5.0  # leave gap where driveways meet roads
-_BUSH_MAX_TOTAL = 600
+_BUSH_MAX_TOTAL = 2000          # tripled (was 600)
 
 # Highways that get road-side bushes (rural classes only)
 _RURAL_ROAD_CLASSES = {
