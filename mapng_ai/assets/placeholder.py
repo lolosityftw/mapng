@@ -159,6 +159,7 @@ def _write_collada(
             )
 
     dae = f"""<?xml version="1.0" encoding="utf-8"?>
+<!-- MapNGMesh:v3 -->
 <COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
   <asset><up_axis>Z_UP</up_axis></asset>
   <library_effects>
@@ -222,7 +223,7 @@ def _pitched_box_collada(path: Path, wall_hex: str, roof_hex: str,
         ( 0.5,  0.0, ridge_z),# 9 E ridge
     ]
 
-    WALL, ROOF = 0, 1
+    WALL, ROOF, CHIMNEY = 0, 1, 2
     faces: list[tuple[int, int, int]] = [
         (0, 2, 1), (0, 3, 2),        # base
         (0, 1, 5), (0, 5, 4),        # south wall
@@ -234,7 +235,6 @@ def _pitched_box_collada(path: Path, wall_hex: str, roof_hex: str,
         (4, 5, 9), (4, 9, 8),        # south roof slope
         (7, 9, 6), (7, 8, 9),        # north roof slope
     ]
-    # gables are WALL colour, roof slopes are ROOF colour
     mids: list[int] = [
         WALL, WALL,
         WALL, WALL,
@@ -247,11 +247,41 @@ def _pitched_box_collada(path: Path, wall_hex: str, roof_hex: str,
         ROOF, ROOF,  # north slope
     ]
 
+    # Chimney — small box on the ridge near east end (only on pitched roofs)
+    if not flat_roof:
+        cw = 0.06   # 6% of building width
+        cx = 0.30   # offset east of centre
+        ch = 0.35   # height above ridge
+        ch_z0 = ridge_z * 0.85       # base sits in roof slope
+        ch_z1 = ridge_z + ch
+        ci = len(verts)
+        verts.extend([
+            (cx - cw, -cw, ch_z0),  # 0 SW
+            (cx + cw, -cw, ch_z0),  # 1 SE
+            (cx + cw, +cw, ch_z0),  # 2 NE
+            (cx - cw, +cw, ch_z0),  # 3 NW
+            (cx - cw, -cw, ch_z1),  # 4 SW top
+            (cx + cw, -cw, ch_z1),  # 5 SE top
+            (cx + cw, +cw, ch_z1),  # 6 NE top
+            (cx - cw, +cw, ch_z1),  # 7 NW top
+        ])
+        ch_faces = [
+            (ci+0, ci+1, ci+5), (ci+0, ci+5, ci+4),  # south
+            (ci+1, ci+2, ci+6), (ci+1, ci+6, ci+5),  # east
+            (ci+2, ci+3, ci+7), (ci+2, ci+7, ci+6),  # north
+            (ci+3, ci+0, ci+4), (ci+3, ci+4, ci+7),  # west
+            (ci+4, ci+5, ci+6), (ci+4, ci+6, ci+7),  # top
+        ]
+        faces.extend(ch_faces)
+        mids.extend([CHIMNEY] * len(ch_faces))
+
     wall_mat = f"{mat_name}_wall"
     roof_mat = f"{mat_name}_roof"
+    chim_mat = f"{mat_name}_chimney"
     materials = [
         (wall_mat, _hex_to_float3(wall_hex)),
         (roof_mat, _hex_to_float3(roof_hex)),
+        (chim_mat, _hex_to_float3("#8B6F4E")),  # warm-brown chimney brick
     ]
     _write_collada(path, verts, faces, mids, materials)
 
@@ -288,26 +318,31 @@ def _slab_collada(path: Path, hex_color: str, mat_name: str,
 
 
 def _bush_collada(path: Path) -> None:
-    """Low-poly bush — flattened octahedron (8 tris, 6 verts).
+    """Low-poly bush — flattened double-stacked octahedron (12 tris, 7 verts).
 
-    Scale-by-instance friendly: unit shape is roughly 1×1×0.7 metres.
-    Material 'MapNG_bush' is solid green; vanilla TSStatic wraps the
-    embedded color.
+    Two slightly-offset bumps give a more rounded silhouette than a
+    single octahedron while staying cheap. Unit size is ~1×1×0.7 m.
     """
-    # 6 verts for a flattened octahedron (wider than tall — bush-shape)
     verts: list[tuple[float, float, float]] = [
-        ( 0.0,  0.0,  0.7),    # 0 top
-        ( 0.5,  0.0,  0.35),   # 1 east
-        ( 0.0,  0.5,  0.35),   # 2 north
-        (-0.5,  0.0,  0.35),   # 3 west
-        ( 0.0, -0.5,  0.35),   # 4 south
-        ( 0.0,  0.0,  0.0),    # 5 bottom
+        ( 0.0,  0.0,  0.7),    # 0 apex
+        ( 0.5,  0.0,  0.4),    # 1 east mid
+        ( 0.0,  0.5,  0.4),    # 2 north mid
+        (-0.5,  0.0,  0.4),    # 3 west mid
+        ( 0.0, -0.5,  0.4),    # 4 south mid
+        # Lower ring (creates the bush "skirt" so it doesn't look like
+        # a single pointy octahedron but more like 2 stacked humps)
+        ( 0.4,  0.4,  0.05),   # 5 NE base
+        (-0.4, -0.4,  0.05),   # 6 SW base
     ]
     faces: list[tuple[int, int, int]] = [
-        # Top half — apex to mid ring
+        # Top — apex to mid ring
         (0, 1, 2), (0, 2, 3), (0, 3, 4), (0, 4, 1),
-        # Bottom half — mid ring to base
-        (5, 2, 1), (5, 3, 2), (5, 4, 3), (5, 1, 4),
+        # Lower hump connections
+        (1, 5, 2), (2, 5, 0),  # NE
+        (3, 6, 4), (4, 6, 0),  # SW
+        # Base sealing
+        (5, 1, 4), (5, 4, 6),
+        (6, 3, 2), (6, 2, 5),
     ]
     mids = [0] * len(faces)
     _write_collada(path, verts, faces, mids,
@@ -355,30 +390,55 @@ def _tree_collada(path: Path) -> None:
         faces.append((top_centre, top_ring + i, top_ring + n))
         mids.append(TRUNK)
 
-    # canopy cone — base ring + apex
-    canopy_base_centre = len(verts)
-    verts.append((0, 0, trunk_h))
-    canopy_base_ring = len(verts)
+    # Canopy: TWO STACKED cones (lower wider darker, upper narrower lighter)
+    # — gives much better visual depth than a single cone, still cheap (~64 tris).
+    CANOPY_DARK = 1
+    CANOPY_LIGHT = 2
+
+    # Lower cone (darker, wider) — base at trunk_h, apex at 80% height
+    lower_z0 = trunk_h
+    lower_z1 = trunk_h + canopy_h * 0.85
+    lower_r = canopy_r
+    lower_base = len(verts)
+    verts.append((0, 0, lower_z0))
+    lower_ring = len(verts)
     for i in range(segs):
         a = 2 * math.pi * i / segs
-        verts.append((canopy_r * math.cos(a), canopy_r * math.sin(a), trunk_h))
-    apex = len(verts)
-    verts.append((0, 0, trunk_h + canopy_h))
-
+        verts.append((lower_r * math.cos(a), lower_r * math.sin(a), lower_z0))
+    lower_apex = len(verts)
+    verts.append((0, 0, lower_z1))
     for i in range(segs):
         n = (i + 1) % segs
-        # base cap
-        faces.append((canopy_base_centre, canopy_base_ring + i, canopy_base_ring + n))
-        mids.append(CANOPY)
-        # side
-        faces.append((canopy_base_ring + i, apex, canopy_base_ring + n))
-        mids.append(CANOPY)
+        faces.append((lower_base, lower_ring + i, lower_ring + n))
+        mids.append(CANOPY_DARK)
+        faces.append((lower_ring + i, lower_apex, lower_ring + n))
+        mids.append(CANOPY_DARK)
+
+    # Upper cone (lighter, narrower) — sits on top, smaller
+    upper_z0 = trunk_h + canopy_h * 0.45
+    upper_z1 = trunk_h + canopy_h * 1.05
+    upper_r  = canopy_r * 0.62
+    upper_base = len(verts)
+    verts.append((0, 0, upper_z0))
+    upper_ring = len(verts)
+    for i in range(segs):
+        a = 2 * math.pi * i / segs
+        verts.append((upper_r * math.cos(a), upper_r * math.sin(a), upper_z0))
+    upper_apex = len(verts)
+    verts.append((0, 0, upper_z1))
+    for i in range(segs):
+        n = (i + 1) % segs
+        faces.append((upper_base, upper_ring + i, upper_ring + n))
+        mids.append(CANOPY_LIGHT)
+        faces.append((upper_ring + i, upper_apex, upper_ring + n))
+        mids.append(CANOPY_LIGHT)
 
     _write_collada(
         path, verts, faces, mids,
         [
-            ("MapNG_tree_trunk", _hex_to_float3("#5D4037")),
-            ("MapNG_tree_canopy", _hex_to_float3("#2E7D32")),
+            ("MapNG_tree_trunk",       _hex_to_float3("#5D4037")),
+            ("MapNG_tree_canopy",      _hex_to_float3("#2E7D32")),   # darker lower
+            ("MapNG_tree_canopy_top",  _hex_to_float3("#4F8B3D")),   # lighter upper
         ],
     )
 
@@ -409,14 +469,21 @@ def _pitched_path_for(building_type: str) -> tuple[Path, str]:
     return _cache_dir() / f"building_{key}.dae", rel
 
 
+# Bump this when the placeholder mesh writers change so cached DAEs
+# get regenerated on next export. Look for this token in the file.
+_MESH_VERSION_TAG = b"MapNGMesh:v3"
+
+
 def _is_mapng_dae(p: Path) -> bool:
-    """Return True only if the file was written by our COLLADA writer."""
+    """Return True only if the file was written by our CURRENT COLLADA writer.
+    Also returns False for older versions (stale cache) so they get rebuilt."""
     if not p.exists():
         return False
     try:
-        return b"MapNG_" in p.read_bytes()[:2048]
+        head = p.read_bytes()[:2048]
     except OSError:
         return False
+    return b"MapNG_" in head and _MESH_VERSION_TAG in head
 
 
 def write_pitched_dae(building_type: str) -> tuple[Path, str]:

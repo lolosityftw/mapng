@@ -807,6 +807,31 @@ def place_foliage(osm: OSMData, region: Region, heightmap_m: np.ndarray, *,
     )
     trees.extend(bushes)
 
+    # Drop any tree/bush/hedge that lands inside an OSM building
+    # footprint. OSM building polygons inside forest landuse cause
+    # "trees through roof" artefacts; this catches them.
+    try:
+        building_polys: list[Polygon] = []
+        for w in osm.ways:
+            tags = w.get("tags") or {}
+            if "building" not in tags:
+                continue
+            ring = way_polygon_ll(w, osm.nodes)
+            if ring is None:
+                continue
+            poly = _project_polygon(ring, cx_world, cy_world)
+            if poly is None or poly.is_empty:
+                continue
+            building_polys.append(poly)
+        if building_polys:
+            building_zone = unary_union(building_polys).buffer(0.5)
+            trees = [t for t in trees
+                     if not building_zone.contains(Point(t.x, t.y))]
+            hedges = [h for h in hedges
+                      if not building_zone.contains(Point(h.x, h.y))]
+    except Exception:
+        pass
+
     return FoliageResult(
         trees=trees,
         hedges=hedges,
