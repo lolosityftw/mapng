@@ -176,26 +176,61 @@ def _project_line(line_ll, cx: float, cy: float) -> LineString | None:
 
 
 def add_garden_features(*, hedges: list, buildings, region: Region,
-                        heightmap_m: np.ndarray, seed: int = 11) -> None:
+                        heightmap_m: np.ndarray, seed: int = 11,
+                        osm=None) -> None:
     """Add a low garden wall + a small back-garden shed for residential
     buildings, in-place into the hedges list (sheds emitted as a special
     `material='gate'` placeholder won't pollute the field synthesiser).
 
-    Operates on placed BuildingPlacements so we get the correct OBB
-    yaw + dimensions for free. We treat anything with type_label
-    matching residential / house / cottage as a candidate.
+    If `osm` is provided, garden walls and sheds that would land within
+    a road buffer get skipped — prevents the "brown box in the middle
+    of the road" artefact when a building's "back" direction points
+    towards a road.
     """
     half = region.side_m / 2
     rng = np.random.default_rng(seed)
     RESIDENTIAL_TYPES = {"residential", "house", "detached", "semi", "bungalow",
                          "apartment", "cottage", "default"}
+
+    # Build road buffer for collision testing
+    road_buffer = None
+    if osm is not None:
+        try:
+            cx_world_local = (region.working_itm.west + region.working_itm.east) / 2
+            cy_world_local = (region.working_itm.south + region.working_itm.north) / 2
+            road_lines: list[LineString] = []
+            ROAD_HWYS = {"primary", "secondary", "tertiary", "unclassified",
+                         "residential", "living_street", "service",
+                         "lane", "track", "motorway", "trunk"}
+            for w in osm.ways:
+                tags = w.get("tags") or {}
+                if tags.get("highway") not in ROAD_HWYS:
+                    continue
+                line_ll = way_line_ll(w, osm.nodes)
+                if not line_ll or len(line_ll) < 2:
+                    continue
+                try:
+                    line = _project_line(line_ll, cx_world_local, cy_world_local)
+                except Exception:
+                    continue
+                if line is not None and not line.is_empty:
+                    road_lines.append(line)
+            if road_lines:
+                # 4m buffer = ~half-road-width keeps walls/sheds clear
+                road_buffer = unary_union(road_lines).buffer(4.0)
+        except Exception:
+            road_buffer = None
+
+    def _on_road(x: float, y: float) -> bool:
+        return road_buffer is not None and road_buffer.contains(Point(x, y))
+
     for b in buildings:
         if (b.asset.type_label or "").lower() not in RESIDENTIAL_TYPES:
             continue
         sl, sw, sh = b.scale_xyz
-        # Per-building deterministic dice — only ~70% of houses get the
-        # garden treatment so the world doesn't look uniform.
-        if rng.random() > 0.70:
+        # Per-building deterministic dice — only ~30% of houses get the
+        # shed treatment so the world doesn't look uniform.
+        if rng.random() > 0.30:
             continue
         # Garden extent — keep tight to the house so walls don't poke
         # through neighbouring buildings in tight terraced clusters.
@@ -218,24 +253,38 @@ def add_garden_features(*, hedges: list, buildings, region: Region,
             wy = b.y_m + world_dy
             if abs(wx) > half or abs(wy) > half:
                 continue
+            # Don't place walls in road carriageway
+            if _on_road(wx, wy):
+                continue
             z = _z_at(heightmap_m, region.side_m, wx, wy) + 0.05
-            # Use HedgeSegment as the carrier even for walls — same
-            # rendering plumbing already exists.
             hedges.append(HedgeSegment(
                 x=wx, y=wy, z=z, length_m=length,
                 width_m=0.3, height_m=0.9, yaw=w_yaw, material="wall",
             ))
-        # Back-garden shed — pick a spot ~5 m behind the house.
-        shed_dx = -(sl / 2 + 5.0)
+        # Back-garden shed — try BOTH "back" directions and pick the
+        # side that's furthest from any road (real sheds are at the
+        # back of the property, not facing the road).
+        shed_dx_back = -(sl / 2 + 5.0)
+        shed_dx_fwd  = +(sl / 2 + 5.0)
         shed_dy = (rng.uniform(-1.0, 1.0)) * (sw / 4)
-        wx = b.x_m + cos_y * shed_dx - sin_y * shed_dy
-        wy = b.y_m + sin_y * shed_dx + cos_y * shed_dy
-        if abs(wx) > half or abs(wy) > half:
-            continue
+        candidates = []
+        for sdx in (shed_dx_back, shed_dx_fwd):
+            wx = b.x_m + cos_y * sdx - sin_y * shed_dy
+            wy = b.y_m + sin_y * sdx + cos_y * shed_dy
+            if abs(wx) > half or abs(wy) > half:
+                continue
+            # Reject any candidate that lands on/near a road
+            if _on_road(wx, wy):
+                continue
+            # Pick whichever side is farther from any road
+            d = (road_buffer.distance(Point(wx, wy))
+                 if road_buffer is not None else 1e9)
+            candidates.append((d, wx, wy))
+        if not candidates:
+            continue   # both sides are blocked by roads — no shed at all
+        candidates.sort(reverse=True)  # furthest road distance first
+        _, wx, wy = candidates[0]
         z = _z_at(heightmap_m, region.side_m, wx, wy)
-        # We use the gate material as a tag for "small garden building"
-        # in the renderer, since gate placeholder is a small box that
-        # also reads believably as a shed. Width≈3 m, height≈2.4 m.
         shed_yaw = b.yaw_rad + rng.uniform(-0.2, 0.2)
         hedges.append(HedgeSegment(
             x=wx, y=wy, z=z, length_m=3.0,

@@ -388,10 +388,12 @@ async def stage_place(ctx: JobContext, emit: Emit) -> None:
         place_foliage, ctx.osm, ctx.region, hm, class_map=ctx.class_map,
     )
     # Garden walls + sheds for residential buildings — extend foliage.hedges in-place.
+    # Pass OSM so the helper can build a road buffer and skip features
+    # that would land on the road carriageway (the "brown box in the road").
     await asyncio.to_thread(
         add_garden_features,
         hedges=ctx.foliage.hedges, buildings=ctx.buildings,
-        region=ctx.region, heightmap_m=hm,
+        region=ctx.region, heightmap_m=hm, osm=ctx.osm,
     )
     ctx.decal_roads = await asyncio.to_thread(extract_decal_roads, ctx.osm, ctx.region, hm)
     # Driveways from isolated buildings to nearest road. Tacked onto
