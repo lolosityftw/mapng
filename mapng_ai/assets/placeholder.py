@@ -287,6 +287,33 @@ def _slab_collada(path: Path, hex_color: str, mat_name: str,
                    [(mat_name, _hex_to_float3(hex_color))])
 
 
+def _bush_collada(path: Path) -> None:
+    """Low-poly bush — flattened octahedron (8 tris, 6 verts).
+
+    Scale-by-instance friendly: unit shape is roughly 1×1×0.7 metres.
+    Material 'MapNG_bush' is solid green; vanilla TSStatic wraps the
+    embedded color.
+    """
+    # 6 verts for a flattened octahedron (wider than tall — bush-shape)
+    verts: list[tuple[float, float, float]] = [
+        ( 0.0,  0.0,  0.7),    # 0 top
+        ( 0.5,  0.0,  0.35),   # 1 east
+        ( 0.0,  0.5,  0.35),   # 2 north
+        (-0.5,  0.0,  0.35),   # 3 west
+        ( 0.0, -0.5,  0.35),   # 4 south
+        ( 0.0,  0.0,  0.0),    # 5 bottom
+    ]
+    faces: list[tuple[int, int, int]] = [
+        # Top half — apex to mid ring
+        (0, 1, 2), (0, 2, 3), (0, 3, 4), (0, 4, 1),
+        # Bottom half — mid ring to base
+        (5, 2, 1), (5, 3, 2), (5, 4, 3), (5, 1, 4),
+    ]
+    mids = [0] * len(faces)
+    _write_collada(path, verts, faces, mids,
+                   [("MapNG_bush", _hex_to_float3("#3F5A28"))])
+
+
 def _tree_collada(path: Path) -> None:
     """Cylinder trunk + cone canopy."""
     trunk_r = 0.05
@@ -372,6 +399,7 @@ _HEDGE_REL = "art/shapes/foliage/hedge.dae"
 _WALL_REL = "art/shapes/foliage/wall.dae"
 _FENCE_REL = "art/shapes/foliage/fence.dae"
 _GATE_REL = "art/shapes/foliage/gate.dae"
+_BUSH_REL = "art/shapes/foliage/bush.dae"
 _SHED_REL = "art/shapes/buildings/shed.dae"
 
 
@@ -412,6 +440,15 @@ def write_tree_dae() -> tuple[Path, str]:
     if not _is_mapng_dae(cache_path):
         _tree_collada(cache_path)
     return cache_path, _TREE_REL
+
+
+def write_bush_dae() -> tuple[Path, str]:
+    """Low-poly placeholder bush — 8 tris, 6 verts.
+    Cheap enough for hundreds of instances per map."""
+    cache_path = _cache_dir() / "bush.dae"
+    if not _is_mapng_dae(cache_path):
+        _bush_collada(cache_path)
+    return cache_path, _BUSH_REL
 
 
 def write_hedge_dae() -> tuple[Path, str]:

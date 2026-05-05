@@ -91,6 +91,7 @@ def _shape_materials_json(level_name: str) -> dict:
     mats["MapNG_shed"]        = _mat("MapNG_shed",        "#7A7A75")
     mats["MapNG_tree_trunk"]  = _mat("MapNG_tree_trunk",  "#5D4037")
     mats["MapNG_tree_canopy"] = _mat("MapNG_tree_canopy", "#2E7D32")
+    mats["MapNG_bush"]        = _mat("MapNG_bush",        "#3F5A28")
     return mats
 
 
@@ -619,22 +620,21 @@ def _mission_group(
             "childs": _hedge_tsstatics(level_name, foliage.hedges),
         })
     if roads:
-        # Default to MeshRoad (3D geometry — what nikkiluzader/mapng uses).
-        # Cleaner than DecalRoad: no flat-on-terrain tearing, no warning_material
-        # fallback, references built-in vanilla material `m_asphalt_new_01`.
-        # Set MAPNG_DECAL_ROADS=1 to use the old DecalRoad path.
-        use_decal = os.environ.get("MAPNG_DECAL_ROADS") == "1"
-        if use_decal:
-            children.append({
-                "class": "SimGroup",
-                "name": "Decal_Roads",
-                "childs": _decal_roads_objects(roads),
-            })
-        else:
+        # DecalRoad by default (user preference, matches our generated road
+        # textures including the dirt driveway one). Set MAPNG_MESH_ROADS=1
+        # to use 3D MeshRoad geometry instead.
+        use_mesh = os.environ.get("MAPNG_MESH_ROADS") == "1"
+        if use_mesh:
             children.append({
                 "class": "SimGroup",
                 "name": "Mesh_roads",
                 "childs": _mesh_roads_objects(roads),
+            })
+        else:
+            children.append({
+                "class": "SimGroup",
+                "name": "Decal_Roads",
+                "childs": _decal_roads_objects(roads),
             })
     return {"class": "SimGroup", "name": "MissionGroup", "childs": children}
 
@@ -986,17 +986,21 @@ def write_level_package(
     # Foliage shapes (trees + hedges)
     # ------------------------------------------------------------------
     if foliage and (foliage.trees or foliage.hedges):
+        from mapng_ai.assets.placeholder import write_bush_dae as _write_bush_dae
         seen_tree: set[str] = set()
         if foliage.trees:
-            placeholder_path, _ = write_tree_dae()
+            tree_path, _ = write_tree_dae()
+            bush_path, _ = _write_bush_dae()
             for t in foliage.trees:
                 rel = t.shape_relpath
                 if rel in seen_tree or rel.startswith("levels/"):
                     continue
                 seen_tree.add(rel)
-                # All non-foreign tree paths are normalized to .dae above,
-                # so write the placeholder DAE there.
-                w(f"{base}/{rel}", placeholder_path.read_bytes())
+                # Pick the right placeholder DAE based on shape relpath
+                # (bush.dae uses the low-poly bush; everything else gets
+                # the cone+cylinder tree).
+                src = bush_path if rel.endswith("/bush.dae") else tree_path
+                w(f"{base}/{rel}", src.read_bytes())
         if foliage.hedges:
             mats = {getattr(h, "material", "hedge") for h in foliage.hedges}
             if "hedge" in mats:

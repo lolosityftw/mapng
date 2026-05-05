@@ -43,11 +43,13 @@ _ROAD_CLASSES_WITH_HEDGES = {
     "unclassified":  {"width": 7.0,  "hedge_offset": 1.2},
     "residential":   {"width": 6.5,  "hedge_offset": 1.0},
     "living_street": {"width": 5.5,  "hedge_offset": 1.0},
-    "service":       {"width": 4.5,  "hedge_offset": 0.6},  # driveways
     "lane":          {"width": 5.0,  "hedge_offset": 0.8},
     "track":         {"width": 4.5,  "hedge_offset": 0.8},
     "path":          {"width": 2.0,  "hedge_offset": 0.5},
-    # motorway / trunk deliberately excluded — they have grass verges, no hedges
+    # 'service' (driveways) deliberately excluded — they shouldn't have
+    # hedges flanking their entire length and we want to leave the
+    # driveway texture unobstructed where it meets the main road.
+    # motorway / trunk also excluded — they have grass verges, no hedges.
 }
 
 
@@ -743,9 +745,222 @@ def place_foliage(osm: OSMData, region: Region, heightmap_m: np.ndarray, *,
         except Exception:
             pass
 
+    # ---- 6) BUSHES — rural-only, road-side + scattered in fields ----
+    bushes = _place_bushes(
+        osm=osm, region=region, heightmap_m=heightmap_m,
+        cx_world=cx_world, cy_world=cy_world, half=half, seed=seed,
+        no_hedge_zone=no_hedge_zone, class_map=class_map,
+    )
+    trees.extend(bushes)
+
     return FoliageResult(
         trees=trees,
         hedges=hedges,
         forest_polys=len(forest_polys),
         standalone_trees=standalone,
     )
+
+
+# ---------------------------------------------------------------------------
+# Bush placement — small low-poly foliage scattered in rural fields and
+# along rural road edges. Uses the existing TreePlacement carrier with
+# species="bush" so the export loop ships them as TSStatics referencing
+# `art/shapes/foliage/bush.dae` (an 8-tri octahedron — cheap enough for
+# hundreds of instances).
+# ---------------------------------------------------------------------------
+
+# Tunables (kept low for performance — 8-tri bushes scale up to ~600 OK)
+_BUSH_FIELD_SPACING_M = 28.0   # Poisson r — sparse scatter in fields
+_BUSH_ROAD_SPACING_M  = 14.0   # along rural road edges
+_BUSH_ROAD_OFFSET_M   = 1.8    # perpendicular distance from road centreline
+_BUSH_ROAD_GAP_DRIVEWAY_M = 5.0  # leave gap where driveways meet roads
+_BUSH_MAX_TOTAL = 600
+
+# Highways that get road-side bushes (rural classes only)
+_RURAL_ROAD_CLASSES = {
+    "primary", "secondary", "tertiary", "unclassified",
+    "residential", "living_street", "lane", "track", "path",
+    # NOTE: 'service' (driveways) deliberately excluded
+}
+
+# OSM landuse tags that mark URBAN areas where we skip bushes entirely
+_URBAN_LANDUSE = {
+    "residential", "commercial", "industrial", "retail",
+    "education", "religious", "military", "construction",
+}
+_URBAN_NATURAL = set()  # nothing — natural=* tags are rural
+
+
+def _build_urban_mask(osm: OSMData, cx_world: float, cy_world: float,
+                     half: float) -> Polygon | None:
+    """Union of OSM urban-landuse polygons, projected into terrain space."""
+    polys: list[Polygon] = []
+    for w in osm.ways:
+        tags = w.get("tags") or {}
+        lu = tags.get("landuse")
+        if lu not in _URBAN_LANDUSE:
+            continue
+        ring = way_polygon_ll(w, osm.nodes)
+        if ring is None:
+            continue
+        poly = _project_polygon(ring, cx_world, cy_world)
+        if poly is None or poly.is_empty:
+            continue
+        polys.append(poly)
+    if not polys:
+        return None
+    try:
+        return unary_union(polys)
+    except Exception:
+        return None
+
+
+def _build_rural_road_lines(osm: OSMData, cx_world: float, cy_world: float,
+                            half: float) -> list[LineString]:
+    """OSM rural-road centrelines projected into terrain space."""
+    lines: list[LineString] = []
+    for w in osm.ways:
+        tags = w.get("tags") or {}
+        if tags.get("highway") not in _RURAL_ROAD_CLASSES:
+            continue
+        line_ll = way_line_ll(w, osm.nodes)
+        if line_ll is None:
+            continue
+        line = _project_line(line_ll, cx_world, cy_world)
+        if line is None or line.is_empty:
+            continue
+        lines.append(line)
+    return lines
+
+
+def _build_driveway_endpoints(osm: OSMData, cx_world: float, cy_world: float,
+                              half: float) -> list[Point]:
+    """Project OSM service road endpoints — used to gap road-side bushes."""
+    pts: list[Point] = []
+    for w in osm.ways:
+        tags = w.get("tags") or {}
+        if tags.get("highway") != "service":
+            continue
+        line_ll = way_line_ll(w, osm.nodes)
+        if line_ll is None:
+            continue
+        line = _project_line(line_ll, cx_world, cy_world)
+        if line is None or line.is_empty:
+            continue
+        coords = list(line.coords)
+        if coords:
+            pts.append(Point(coords[0]))
+            pts.append(Point(coords[-1]))
+    return pts
+
+
+def _place_bushes(*, osm: OSMData, region: Region, heightmap_m: np.ndarray,
+                 cx_world: float, cy_world: float, half: float, seed: int,
+                 no_hedge_zone, class_map: np.ndarray | None
+                 ) -> list[TreePlacement]:
+    rng = np.random.default_rng(seed ^ 0xB05BE5)
+    urban = _build_urban_mask(osm, cx_world, cy_world, half)
+    rural_roads = _build_rural_road_lines(osm, cx_world, cy_world, half)
+    drive_pts = _build_driveway_endpoints(osm, cx_world, cy_world, half)
+    drive_buffer = unary_union([p.buffer(_BUSH_ROAD_GAP_DRIVEWAY_M)
+                                for p in drive_pts]) if drive_pts else None
+    road_keepout = no_hedge_zone.buffer(0.0) if no_hedge_zone is not None else None
+
+    # Class-map lookup helpers (skip non-rural surfaces like asphalt/water)
+    cm_size = class_map.shape[0] if class_map is not None else 0
+    BUSH_OK_CLASSES = {2, 3, 4, 7}  # lawn, pasture, earth, forest
+
+    def _is_grassy(x: float, y: float) -> bool:
+        if class_map is None:
+            return True
+        cx_idx = int((x + half) / region.side_m * cm_size)
+        cy_idx = int((y + half) / region.side_m * cm_size)
+        if not (0 <= cx_idx < cm_size and 0 <= cy_idx < cm_size):
+            return False
+        # class_map is row 0 = north, our world has +y = north
+        return int(class_map[cm_size - 1 - cy_idx, cx_idx]) in BUSH_OK_CLASSES
+
+    bushes: list[TreePlacement] = []
+
+    # ---------- A) Road-side bushes (rural roads only) ----------
+    for line in rural_roads:
+        L = line.length
+        if L < _BUSH_ROAD_SPACING_M:
+            continue
+        steps = int(L / _BUSH_ROAD_SPACING_M)
+        for k in range(1, steps):
+            if len(bushes) >= _BUSH_MAX_TOTAL:
+                break
+            t = k * _BUSH_ROAD_SPACING_M / L
+            t = min(0.999, max(0.001, t + rng.uniform(-0.04, 0.04)))
+            pt = line.interpolate(t * L)
+            # Skip in urban areas
+            if urban is not None and urban.contains(pt):
+                continue
+            # Skip near driveway endpoints (where service roads meet)
+            if drive_buffer is not None and drive_buffer.contains(pt):
+                continue
+            # Tangent direction → perpendicular for offset
+            t2 = min(0.999, t + 0.001)
+            ahead = line.interpolate(t2 * L)
+            dx = ahead.x - pt.x; dy = ahead.y - pt.y
+            ln = (dx * dx + dy * dy) ** 0.5 or 1.0
+            ux, uy = dx / ln, dy / ln
+            nx, ny = -uy, ux
+            # Place on alternating sides
+            side = 1 if (k % 2 == 0) else -1
+            off = _BUSH_ROAD_OFFSET_M + rng.uniform(0.0, 0.6)
+            bx = pt.x + nx * off * side
+            by = pt.y + ny * off * side
+            if abs(bx) > half or abs(by) > half:
+                continue
+            # Don't sit ON the road carriageway
+            if road_keepout is not None and road_keepout.contains(Point(bx, by)):
+                continue
+            if not _is_grassy(bx, by):
+                continue
+            sr = np.random.default_rng(int(abs(hash((round(bx, 1), round(by, 1))))) & 0xFFFFFFFF)
+            scale = float(0.7 + sr.random() * 0.7)   # 0.7-1.4m bush
+            yaw = float(sr.random() * 2 * np.pi)
+            z = _z_at(heightmap_m, region.side_m, bx, by)
+            bushes.append(TreePlacement(
+                x=bx, y=by, z=z,
+                scale_xyz=(scale, scale, scale * 0.7),
+                yaw=yaw,
+                shape_relpath="art/shapes/foliage/bush.dae",
+                species="bush",
+            ))
+        if len(bushes) >= _BUSH_MAX_TOTAL:
+            break
+
+    # ---------- B) Field-scattered bushes ----------
+    field_budget = max(0, _BUSH_MAX_TOTAL - len(bushes))
+    if field_budget > 0:
+        # Poisson-disk over the terrain bounding box
+        def _mask_field(x: float, y: float) -> bool:
+            if abs(x) > half - 5 or abs(y) > half - 5:
+                return False
+            if urban is not None and urban.contains(Point(x, y)):
+                return False
+            if road_keepout is not None and road_keepout.contains(Point(x, y)):
+                return False
+            return _is_grassy(x, y)
+        pts = _poisson_disk(2 * half, 2 * half,
+                           _BUSH_FIELD_SPACING_M, seed=seed + 17,
+                           mask=_mask_field)
+        for x, y in pts:
+            if len(bushes) >= _BUSH_MAX_TOTAL:
+                break
+            sr = np.random.default_rng(int(abs(hash((round(x, 1), round(y, 1))))) & 0xFFFFFFFF)
+            scale = float(0.6 + sr.random() * 0.9)   # 0.6-1.5m
+            yaw = float(sr.random() * 2 * np.pi)
+            z = _z_at(heightmap_m, region.side_m, x, y)
+            bushes.append(TreePlacement(
+                x=x, y=y, z=z,
+                scale_xyz=(scale, scale, scale * 0.7),
+                yaw=yaw,
+                shape_relpath="art/shapes/foliage/bush.dae",
+                species="bush",
+            ))
+
+    return bushes
