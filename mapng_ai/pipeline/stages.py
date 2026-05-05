@@ -557,11 +557,14 @@ async def stage_export(ctx: JobContext, emit: Emit) -> None:
                 "beamng_error": f"{type(exc).__name__}: {exc}",
             })
 
-    # Extract water bodies (lakes/reservoirs/rivers) from OSM
-    from mapng_ai.pipeline.water import extract_water_bodies
+    # Extract water bodies (lakes/reservoirs/rivers) and coastline from OSM
+    from mapng_ai.pipeline.water import extract_water_bodies, extract_coastline
     water_bodies = await asyncio.to_thread(
         extract_water_bodies, ctx.osm, ctx.region, ctx.heightmap.elevations_m,
     )
+    coast = await asyncio.to_thread(extract_coastline, ctx.osm, ctx.region)
+    if coast is not None:
+        water_bodies.append(coast)
 
     pkg = await asyncio.to_thread(
         write_level_package,

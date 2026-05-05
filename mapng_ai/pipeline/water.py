@@ -46,6 +46,12 @@ _WATER_TAGS = {
 }
 
 
+# Sea-level z used for coastline-bounded ocean WaterBlocks. NI's coast is
+# approximately at OS Newlyn datum (≈0m). For maps inland that include
+# part of the coast, this gives us an actual ocean visible.
+_SEA_LEVEL_M = 0.0
+
+
 def extract_water_bodies(osm: OSMData, region: Region,
                         heightmap_m: np.ndarray) -> list[WaterBody]:
     """Find OSM water polygons and return one WaterBody per polygon."""
@@ -94,6 +100,37 @@ def extract_water_bodies(osm: OSMData, region: Region,
             length=length, width=width, depth=depth, yaw=0.0,
         ))
     return bodies
+
+
+def extract_coastline(osm: OSMData, region: Region) -> WaterBody | None:
+    """If the bbox includes any OSM coastline, emit one big WaterBody for
+    the sea side. The coastline way separates land from sea — we don't
+    know which side is which without OSM convention parsing, so we emit
+    a WaterBlock at sea level covering the full terrain bounds. The
+    terrain itself stays unchanged (no carving); only land that's above
+    sea level shows.
+
+    Returns None if no coastline tags are present.
+    """
+    has_coast = False
+    for w in osm.ways:
+        tags = w.get("tags") or {}
+        if tags.get("natural") == "coastline":
+            has_coast = True
+            break
+    if not has_coast:
+        return None
+    side = float(region.side_m)
+    return WaterBody(
+        name="ocean",
+        cx=0.0, cy=0.0, cz=_SEA_LEVEL_M,
+        # Make it generous — extends 50m beyond terrain edge so the
+        # horizon doesn't show a hard water/sky seam at the bbox edge.
+        length=side + 100.0,
+        width=side + 100.0,
+        depth=20.0,
+        yaw=0.0,
+    )
 
 
 def water_block_dict(body: WaterBody, level_name: str, idx: int) -> dict:
