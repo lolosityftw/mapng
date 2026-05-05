@@ -34,60 +34,77 @@ _DEFAULT_LEVELS = (
 
 
 # Curated whitelist of Italy assets safe for placement on a generated map.
-# The auto-scanner picked up 227 items including billboards, bridges, dams,
-# bus stops, etc. — all in /buildings/ folders — and stretched them to
-# residential footprints. This whitelist is the residential / village
-# subset only, with manually-estimated natural sizes (length × width × height
-# in metres) so the placement scaler produces reasonable buildings.
-#
-# Sizes are estimated from visual inspection + filename hints (e.g.
-# `italy_bld_20x12_apartment` is 20m × 12m). They're approximate but
-# within ~2× of reality, which is enough for sane placement scaling.
+# Sizes are MEASURED from real DAE bounding boxes via trimesh — see
+# italy_bounds.py and italy_bounds.json. The previous "hand-eyeball
+# the size" approach was wildly off (e.g. palazzo eyeballed at 20m,
+# actual size 56m → 3× scaling error → buildings appearing 100× too big).
 
-# (relpath, type, length_m, width_m, height_m)
-_ITALY_BUILDINGS: tuple[tuple[str, str, float, float, float], ...] = (
-    # 16 town/village houses — small to large
-    ("/levels/italy/art/shapes/buildings/italy_town_bld1.dae",  "residential",  8,  7,  8),
-    ("/levels/italy/art/shapes/buildings/italy_town_bld2.dae",  "residential", 10,  8,  9),
-    ("/levels/italy/art/shapes/buildings/italy_town_bld3.dae",  "residential", 12, 10, 10),
-    ("/levels/italy/art/shapes/buildings/italy_town_bld4.dae",  "residential", 10,  8,  8),
-    ("/levels/italy/art/shapes/buildings/italy_town_bld5.dae",  "residential", 12, 10, 10),
-    ("/levels/italy/art/shapes/buildings/italy_town_bld6.dae",  "shop",        12, 10, 10),
-    ("/levels/italy/art/shapes/buildings/italy_town_bld7.dae",  "shop",        14, 11, 11),
-    ("/levels/italy/art/shapes/buildings/italy_town_bld8.dae",  "shop",        12, 10, 10),
-    ("/levels/italy/art/shapes/buildings/italy_town_bld9.dae",  "residential", 14, 12, 12),
-    ("/levels/italy/art/shapes/buildings/italy_town_bld10.dae", "shop",        16, 13, 13),
-    ("/levels/italy/art/shapes/buildings/italy_town_bld11.dae", "residential", 18, 14, 14),
-    ("/levels/italy/art/shapes/buildings/italy_town_bld12.dae", "shop",        20, 16, 16),
-    ("/levels/italy/art/shapes/buildings/italy_town_bld13.dae", "apartment",   20, 16, 18),
-    ("/levels/italy/art/shapes/buildings/italy_town_bld14.dae", "apartment",   22, 18, 20),
-    ("/levels/italy/art/shapes/buildings/italy_town_bld15.dae", "apartment",   24, 20, 22),
-    ("/levels/italy/art/shapes/buildings/italy_town_bld16.dae", "apartment",   30, 25, 25),
-    # Apartment — explicit dimensions in filename
-    ("/levels/italy/art/shapes/buildings/italy_bld_20x12_apartment.dae", "apartment", 20, 12, 15),
-    # Churches
-    ("/levels/italy/art/shapes/buildings/italy_bld_small_church.dae",   "civic", 12,  8, 15),
-    ("/levels/italy/art/shapes/buildings/italy_bld_church_village.dae", "civic", 18, 12, 20),
-    # Mansions / villas
-    ("/levels/italy/art/shapes/buildings/italy_village_palazzo.dae",     "residential", 20, 15, 15),
-    ("/levels/italy/art/shapes/buildings/italy_bld_hilltop_mansion.dae", "residential", 18, 14, 12),
+# (relpath, type)
+_ITALY_BUILDINGS_RAW: tuple[tuple[str, str], ...] = (
+    # 16 town/village houses
+    ("/levels/italy/art/shapes/buildings/italy_town_bld1.dae",  "residential"),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld2.dae",  "residential"),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld3.dae",  "residential"),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld4.dae",  "residential"),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld5.dae",  "residential"),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld6.dae",  "shop"),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld7.dae",  "shop"),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld8.dae",  "shop"),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld9.dae",  "residential"),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld10.dae", "shop"),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld11.dae", "residential"),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld12.dae", "shop"),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld13.dae", "apartment"),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld14.dae", "apartment"),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld15.dae", "apartment"),
+    ("/levels/italy/art/shapes/buildings/italy_town_bld16.dae", "apartment"),
+    # Apartment + small church (palazzo + mansion + large church dropped:
+    # they measured 50m+ across, way too big to represent NI village blocks)
+    ("/levels/italy/art/shapes/buildings/italy_bld_20x12_apartment.dae", "apartment"),
+    ("/levels/italy/art/shapes/buildings/italy_bld_small_church.dae",    "civic"),
 )
 
-# (relpath, type, length_m, width_m, height_m)
-_ITALY_TREES: tuple[tuple[str, str, float, float, float], ...] = (
-    ("/levels/italy/art/shapes/trees/trees_italy/holm_oak.dae",           "oak",    8,  8, 10),
-    ("/levels/italy/art/shapes/trees/trees_italy/holm_oak_city_small.dae", "oak",   5,  5,  6),
-    ("/levels/italy/art/shapes/trees/trees_italy/holm_oak_city_tall.dae",  "oak",   8,  8, 12),
-    ("/levels/italy/art/shapes/trees/trees_italy/cypress_tree.dae",        "cypress", 3,  3, 12),
-    ("/levels/italy/art/shapes/trees/trees_italy/maritime_pine.dae",       "pine",  10, 10, 18),
-    ("/levels/italy/art/shapes/trees/trees_italy/maritime_pine_2.dae",     "pine",   8,  8, 14),
-    ("/levels/italy/art/shapes/trees/trees_italy/scots_pine.dae",          "pine",   6,  6, 12),
-    ("/levels/italy/art/shapes/trees/trees_italy/olive.dae",               "olive",  6,  6,  6),
-    ("/levels/italy/art/shapes/trees/trees_italy/cork_oak_medium.dae",     "oak",    7,  7,  9),
-    ("/levels/italy/art/shapes/trees/trees_italy/cork_oak_large_1.dae",    "oak",   10, 10, 12),
-    ("/levels/italy/art/shapes/trees/trees_italy/generibush.dae",          "bush",   2,  2, 1.5),
-    ("/levels/italy/art/shapes/trees/trees_italy/fluffy_bush.dae",         "bush",   2,  2, 1.5),
+# (relpath, type)
+_ITALY_TREES_RAW: tuple[tuple[str, str], ...] = (
+    ("/levels/italy/art/shapes/trees/trees_italy/holm_oak.dae",           "oak"),
+    ("/levels/italy/art/shapes/trees/trees_italy/holm_oak_city_small.dae", "oak"),
+    ("/levels/italy/art/shapes/trees/trees_italy/holm_oak_city_tall.dae",  "oak"),
+    ("/levels/italy/art/shapes/trees/trees_italy/maritime_pine.dae",       "pine"),
+    ("/levels/italy/art/shapes/trees/trees_italy/maritime_pine_2.dae",     "pine"),
+    ("/levels/italy/art/shapes/trees/trees_italy/scots_pine.dae",          "pine"),
+    ("/levels/italy/art/shapes/trees/trees_italy/cork_oak_medium.dae",     "oak"),
+    ("/levels/italy/art/shapes/trees/trees_italy/cork_oak_large_1.dae",    "oak"),
+    ("/levels/italy/art/shapes/trees/trees_italy/generibush.dae",          "bush"),
+    ("/levels/italy/art/shapes/trees/trees_italy/fluffy_bush.dae",         "bush"),
 )
+
+
+def _resolve_italy_sizes() -> tuple[
+    tuple[tuple[str, str, float, float, float], ...],
+    tuple[tuple[str, str, float, float, float], ...],
+]:
+    """Read italy_bounds.json cache; build whitelists with real measurements.
+    Skips any asset whose bounds didn't measure properly (fallback to None
+    is filtered out)."""
+    try:
+        from mapng_ai.sources.italy_bounds import get_or_measure
+    except ImportError:
+        return ((), ())
+    all_paths = [p for p, _ in _ITALY_BUILDINGS_RAW] + [p for p, _ in _ITALY_TREES_RAW]
+    measured = get_or_measure(all_paths)
+    DEFAULT = (10.0, 8.0, 5.0)
+    buildings = tuple(
+        (p, t, *measured[p]) for p, t in _ITALY_BUILDINGS_RAW
+        if measured.get(p) and measured[p] != DEFAULT
+    )
+    trees = tuple(
+        (p, t, *measured[p]) for p, t in _ITALY_TREES_RAW
+        if measured.get(p) and measured[p] != DEFAULT
+    )
+    return buildings, trees
+
+
+_ITALY_BUILDINGS, _ITALY_TREES = _resolve_italy_sizes()
 
 
 @dataclass(frozen=True)

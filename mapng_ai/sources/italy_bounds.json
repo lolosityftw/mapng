@@ -1,0 +1,137 @@
+{
+  "/levels/italy/art/shapes/buildings/italy_bld_20x12_apartment.dae": [
+    20.399974822998047,
+    12.0,
+    32.40000057220459
+  ],
+  "/levels/italy/art/shapes/buildings/italy_town_bld1.dae": [
+    15.22763967514038,
+    9.36494493484497,
+    14.78147459030879
+  ],
+  "/levels/italy/art/shapes/buildings/italy_town_bld10.dae": [
+    15.256817817687988,
+    12.47825002670288,
+    14.33274507522583
+  ],
+  "/levels/italy/art/shapes/buildings/italy_town_bld11.dae": [
+    11.361601829528809,
+    9.23488998413086,
+    15.758623123168945
+  ],
+  "/levels/italy/art/shapes/buildings/italy_town_bld12.dae": [
+    20.4839129447937,
+    7.399777889251709,
+    14.323677301414136
+  ],
+  "/levels/italy/art/shapes/buildings/italy_town_bld13.dae": [
+    15.666534900665283,
+    11.56169319152832,
+    14.917374849312182
+  ],
+  "/levels/italy/art/shapes/buildings/italy_town_bld14.dae": [
+    14.398216247558594,
+    10.581346988677979,
+    17.076382637023926
+  ],
+  "/levels/italy/art/shapes/buildings/italy_town_bld15.dae": [
+    13.458574771881104,
+    9.933042287826538,
+    17.19865489005315
+  ],
+  "/levels/italy/art/shapes/buildings/italy_town_bld16.dae": [
+    8.253072023391724,
+    10.324458122253418,
+    12.002105474479322
+  ],
+  "/levels/italy/art/shapes/buildings/italy_town_bld2.dae": [
+    5.614331007003784,
+    8.97748875617981,
+    13.437464714057569
+  ],
+  "/levels/italy/art/shapes/buildings/italy_town_bld3.dae": [
+    8.102977752685547,
+    11.000617027282715,
+    18.096693754239823
+  ],
+  "/levels/italy/art/shapes/buildings/italy_town_bld4.dae": [
+    10.147417068481445,
+    13.64378023147583,
+    14.819173097610474
+  ],
+  "/levels/italy/art/shapes/buildings/italy_town_bld5.dae": [
+    13.222474098205566,
+    14.778244972229004,
+    14.946688652038574
+  ],
+  "/levels/italy/art/shapes/buildings/italy_town_bld6.dae": [
+    14.444506645202637,
+    11.87626028060913,
+    12.36207294464839
+  ],
+  "/levels/italy/art/shapes/buildings/italy_town_bld7.dae": [
+    7.949104070663452,
+    10.299835205078125,
+    13.835025310516357
+  ],
+  "/levels/italy/art/shapes/buildings/italy_town_bld8.dae": [
+    11.514663696289062,
+    10.554244995117188,
+    11.777037382125854
+  ],
+  "/levels/italy/art/shapes/buildings/italy_town_bld9.dae": [
+    13.011650085449219,
+    13.072540283203125,
+    16.2919542789532
+  ],
+  "/levels/italy/art/shapes/trees/trees_italy/cork_oak_large_1.dae": [
+    13.094179630279541,
+    14.441715717315674,
+    13.890924453735352
+  ],
+  "/levels/italy/art/shapes/trees/trees_italy/cork_oak_medium.dae": [
+    9.407557964324951,
+    7.627506971359253,
+    11.196404665708542
+  ],
+  "/levels/italy/art/shapes/trees/trees_italy/fluffy_bush.dae": [
+    4.255465984344482,
+    3.9166539907455444,
+    2.81837660074234
+  ],
+  "/levels/italy/art/shapes/trees/trees_italy/generibush.dae": [
+    5.631777834351098,
+    4.983226452840626,
+    2.0561923265881177
+  ],
+  "/levels/italy/art/shapes/trees/trees_italy/holm_oak.dae": [
+    11.572229862213135,
+    12.573891162872314,
+    12.860939502716064
+  ],
+  "/levels/italy/art/shapes/trees/trees_italy/holm_oak_city_small.dae": [
+    4.946180105209351,
+    4.042440056800842,
+    5.6411552131175995
+  ],
+  "/levels/italy/art/shapes/trees/trees_italy/holm_oak_city_tall.dae": [
+    5.949542999267578,
+    5.024173974990845,
+    9.678215026855469
+  ],
+  "/levels/italy/art/shapes/trees/trees_italy/maritime_pine.dae": [
+    13.544910587664845,
+    11.303489562014306,
+    12.669239068396791
+  ],
+  "/levels/italy/art/shapes/trees/trees_italy/maritime_pine_2.dae": [
+    8.99566104394836,
+    8.401341867500207,
+    11.974876590289341
+  ],
+  "/levels/italy/art/shapes/trees/trees_italy/scots_pine.dae": [
+    11.622437000274658,
+    9.589149951934814,
+    18.909805059432983
+  ]
+}

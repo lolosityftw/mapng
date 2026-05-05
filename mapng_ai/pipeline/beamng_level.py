@@ -412,12 +412,16 @@ def _decal_roads_objects(roads: Sequence[DecalRoad]) -> list[dict]:
             "nodes": [[x, y, z, road.width_m] for (x, y, z) in road.nodes_xyz],
             "drivability": 0.6 if is_drive else 1.0,
             "renderPriority": 8 if is_drive else 10,
-            "breakAngle": 3,
+            # breakAngle = max angle (degrees) the spline tolerates before
+            # snapping to a hard corner. 3° was way too tight — any rural
+            # bend > 3° showed a visible tear in the decal. Vanilla uses
+            # ~22° which produces smooth curves at typical road angles.
+            "breakAngle": 22,
             "distanceFade": [200, 50],
             "startEndFade": [5, 5],
             "textureLength": 5.0 if is_drive else 12.0,
             "improvedSpline": True,
-            "smoothness": 0.5,
+            "smoothness": 1.0,  # full smoothness; was 0.5 (jagged)
             "useSubdivisions": True,
         })
     return out
