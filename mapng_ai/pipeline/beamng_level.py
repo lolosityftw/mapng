@@ -399,12 +399,30 @@ def _hedge_tsstatics(level_name: str, hedges: Sequence[HedgeSegment]) -> list[di
 
 
 def _decal_roads_objects(roads: Sequence[DecalRoad]) -> list[dict]:
+    """DecalRoads + a couple of tricks that reduce junction tearing:
+
+    1. startEndFade [15, 15] — long alpha taper at each road end means two
+       roads meeting at a junction blend smoothly into the terrain
+       (and into each other) instead of a hard edge stacking visibly.
+    2. renderPriority varies by road width — wider roads draw on top.
+       At a junction the bigger road's decal covers the smaller road's
+       endpoint, eliminating the "Y-tear" artifact.
+    """
+    # Sort wider-first so wider roads get higher render priority
+    sorted_roads = sorted(roads, key=lambda r: -r.width_m)
     out = []
-    for road in roads:
+    for idx, road in enumerate(sorted_roads):
         is_drive = getattr(road, "material", "asphalt") == "dirt"
         material = "MapNG_DriveDecal" if is_drive else "MapNG_RoadDecal"
         prefix = "drive" if is_drive else "road"
         first = road.nodes_xyz[0]
+        # Driveways below all asphalt roads. Among asphalt roads, wider =
+        # higher priority. priority 1 (lowest) … 50 (highest).
+        if is_drive:
+            priority = 5
+        else:
+            # Width-bucketed: widest gets 50, narrower drops by index
+            priority = max(15, 50 - idx)
         out.append({
             "class": "DecalRoad",
             "name": f"{prefix}_{road.osm_id}",
@@ -412,10 +430,12 @@ def _decal_roads_objects(roads: Sequence[DecalRoad]) -> list[dict]:
             "position": [first[0], first[1], first[2]],
             "nodes": [[x, y, z, road.width_m] for (x, y, z) in road.nodes_xyz],
             "drivability": 0.6 if is_drive else 1.0,
-            "renderPriority": 8 if is_drive else 10,
+            "renderPriority": priority,
             "breakAngle": 22,
             "distanceFade": [200, 50],
-            "startEndFade": [5, 5],
+            # Long alpha taper at each end → smooth blend at junctions
+            # (was [5, 5] which produced visible hard edges).
+            "startEndFade": [15, 15],
             "textureLength": 5.0 if is_drive else 12.0,
             "improvedSpline": True,
             "smoothness": 1.0,
