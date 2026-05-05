@@ -557,6 +557,12 @@ async def stage_export(ctx: JobContext, emit: Emit) -> None:
                 "beamng_error": f"{type(exc).__name__}: {exc}",
             })
 
+    # Extract water bodies (lakes/reservoirs/rivers) from OSM
+    from mapng_ai.pipeline.water import extract_water_bodies
+    water_bodies = await asyncio.to_thread(
+        extract_water_bodies, ctx.osm, ctx.region, ctx.heightmap.elevations_m,
+    )
+
     pkg = await asyncio.to_thread(
         write_level_package,
         level_name=level_name,
@@ -568,6 +574,7 @@ async def stage_export(ctx: JobContext, emit: Emit) -> None:
         decal_roads=ctx.decal_roads,
         splat=ctx.splat,
         terrain_png_bytes=terrain_png,
+        water_bodies=water_bodies,
     )
     ctx.level_package = pkg
     ctx.artifacts["level_zip"] = f"/api/jobs/{ctx.job_id}/files/{pkg.zip_path.name}"

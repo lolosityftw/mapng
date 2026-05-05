@@ -613,6 +613,7 @@ def _mission_group(
     roads: Sequence[DecalRoad],
     water_z: float | None = None,
     texture_set: str = "",
+    water_bodies: Sequence = (),
 ) -> dict:
     sx, sy, sz = spawn_xyz
     children = [
@@ -629,6 +630,14 @@ def _mission_group(
                                      water_z=water_z, texture_set=texture_set),
         },
     ]
+    if water_bodies:
+        from mapng_ai.pipeline.water import water_block_dict
+        children.append({
+            "class": "SimGroup",
+            "name": "Water",
+            "childs": [water_block_dict(b, level_name, i)
+                       for i, b in enumerate(water_bodies)],
+        })
     if buildings:
         children.append({
             "class": "SimGroup",
@@ -788,6 +797,7 @@ def write_level_package(
     foliage: FoliageResult | None = None,
     decal_roads: Sequence[DecalRoad] = (),
     splat: SplatResult | None = None,
+    water_bodies: Sequence = (),
 ) -> LevelPackage:
     out_dir.mkdir(parents=True, exist_ok=True)
     zip_path = out_dir / f"{level_name}.zip"
@@ -1056,7 +1066,7 @@ def write_level_package(
     scene_root = _mission_group(
         level_name, side_m, size_px, t_min, t_max, spawn_xyz,
         buildings, foliage, decal_roads, water_z=water_z,
-        texture_set=texture_set,
+        texture_set=texture_set, water_bodies=water_bodies,
     )
     _emit_ndjson_tree(scene_root, f"{base}/main", w)
 
