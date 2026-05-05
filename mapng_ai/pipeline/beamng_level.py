@@ -80,12 +80,16 @@ def _shape_materials_json(level_name: str) -> dict:
     mats: dict = {}
     for btype, wall_hex in _TYPE_COLORS.items():
         roof_hex = _ROOF_COLORS.get(btype, _ROOF_COLORS["default"])
-        mats[f"MapNG_bld_{btype}_wall"]    = _mat(f"MapNG_bld_{btype}_wall", wall_hex)
-        mats[f"MapNG_bld_{btype}_roof"]    = _mat(f"MapNG_bld_{btype}_roof", roof_hex)
+        mats[f"MapNG_bld_{btype}_wall"]    = _mat(f"MapNG_bld_{btype}_wall",    wall_hex)
+        mats[f"MapNG_bld_{btype}_roof"]    = _mat(f"MapNG_bld_{btype}_roof",    roof_hex)
         mats[f"MapNG_bld_{btype}_chimney"] = _mat(f"MapNG_bld_{btype}_chimney", "#8B6F4E")
+        mats[f"MapNG_bld_{btype}_window"]  = _mat(f"MapNG_bld_{btype}_window",  "#2C3942")
+        mats[f"MapNG_bld_{btype}_door"]    = _mat(f"MapNG_bld_{btype}_door",    "#3F2A1E")
     mats["MapNG_bld_default_wall"]    = _mat("MapNG_bld_default_wall",    _TYPE_COLORS["default"])
     mats["MapNG_bld_default_roof"]    = _mat("MapNG_bld_default_roof",    _ROOF_COLORS["default"])
     mats["MapNG_bld_default_chimney"] = _mat("MapNG_bld_default_chimney", "#8B6F4E")
+    mats["MapNG_bld_default_window"]  = _mat("MapNG_bld_default_window",  "#2C3942")
+    mats["MapNG_bld_default_door"]    = _mat("MapNG_bld_default_door",    "#3F2A1E")
     mats["MapNG_hedge"]       = _mat("MapNG_hedge",       "#3F5A28")
     mats["MapNG_wall"]        = _mat("MapNG_wall",        "#8A8479")
     mats["MapNG_fence"]       = _mat("MapNG_fence",       "#5C4A2C")

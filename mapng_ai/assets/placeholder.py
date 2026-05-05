@@ -159,7 +159,7 @@ def _write_collada(
             )
 
     dae = f"""<?xml version="1.0" encoding="utf-8"?>
-<!-- MapNGMesh:v3 -->
+<!-- MapNGMesh:v4 -->
 <COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
   <asset><up_axis>Z_UP</up_axis></asset>
   <library_effects>
@@ -206,7 +206,15 @@ def _write_collada(
 # ---------------------------------------------------------------------------
 
 def _pitched_box_collada(path: Path, wall_hex: str, roof_hex: str,
-                          flat_roof: bool, mat_name: str) -> None:
+                          flat_roof: bool, mat_name: str,
+                          storeys: int = 1) -> None:
+    """Generate a placeholder building DAE with windows + chimney.
+
+    Single 1×1×1 unit shape — TSStatic scales it per-instance to OSM
+    footprint dimensions. `flat_roof=True` for industrial / apartments
+    (no gable). `storeys` controls window-row count: 1 for cottages,
+    2-3 for terraces, 4-5 for apartments.
+    """
     box_h = 1.0 if flat_roof else 0.7
     ridge_z = box_h if flat_roof else 1.0
 
@@ -223,7 +231,7 @@ def _pitched_box_collada(path: Path, wall_hex: str, roof_hex: str,
         ( 0.5,  0.0, ridge_z),# 9 E ridge
     ]
 
-    WALL, ROOF, CHIMNEY = 0, 1, 2
+    WALL, ROOF, CHIMNEY, WINDOW, DOOR = 0, 1, 2, 3, 4
     faces: list[tuple[int, int, int]] = [
         (0, 2, 1), (0, 3, 2),        # base
         (0, 1, 5), (0, 5, 4),        # south wall
@@ -247,30 +255,116 @@ def _pitched_box_collada(path: Path, wall_hex: str, roof_hex: str,
         ROOF, ROOF,  # north slope
     ]
 
-    # Chimney — small box on the ridge near east end (only on pitched roofs)
+    # ---- Windows: one row per storey, 3 windows per long wall, 2 per short ----
+    # Each window is a small quad inset OUTWARDS from the wall by a tiny
+    # delta so it shows on top of the wall material. At scale 10x in
+    # game the inset = 5cm — barely a bay window depth, looks fine.
+    OUTSET = 0.005
+    win_w = 0.10   # ~10% of building width per window
+    win_h_per_storey = (box_h - 0.05) / max(1, storeys + 1)
+    win_h = win_h_per_storey * 0.5
+
+    def _add_window_panel(centre_x: float, centre_y: float, centre_z: float,
+                          half_horiz: float, half_vert: float,
+                          face_axis: str):
+        """Add a window quad on a wall face. face_axis = '+x'/'-x'/'+y'/'-y'."""
+        nonlocal verts, faces, mids
+        # Compute the 4 corners in 3D depending on the wall orientation
+        if face_axis == "-y":   # south wall, normal points -y
+            cy = -0.5 - OUTSET
+            corners = [
+                (centre_x - half_horiz, cy, centre_z - half_vert),
+                (centre_x + half_horiz, cy, centre_z - half_vert),
+                (centre_x + half_horiz, cy, centre_z + half_vert),
+                (centre_x - half_horiz, cy, centre_z + half_vert),
+            ]
+            wind = [(0, 1, 2), (0, 2, 3)]
+        elif face_axis == "+y":   # north wall
+            cy = 0.5 + OUTSET
+            corners = [
+                (centre_x + half_horiz, cy, centre_z - half_vert),
+                (centre_x - half_horiz, cy, centre_z - half_vert),
+                (centre_x - half_horiz, cy, centre_z + half_vert),
+                (centre_x + half_horiz, cy, centre_z + half_vert),
+            ]
+            wind = [(0, 1, 2), (0, 2, 3)]
+        elif face_axis == "+x":   # east wall
+            cx = 0.5 + OUTSET
+            corners = [
+                (cx, centre_y - half_horiz, centre_z - half_vert),
+                (cx, centre_y + half_horiz, centre_z - half_vert),
+                (cx, centre_y + half_horiz, centre_z + half_vert),
+                (cx, centre_y - half_horiz, centre_z + half_vert),
+            ]
+            wind = [(0, 1, 2), (0, 2, 3)]
+        else:                      # -x  (west wall)
+            cx = -0.5 - OUTSET
+            corners = [
+                (cx, centre_y + half_horiz, centre_z - half_vert),
+                (cx, centre_y - half_horiz, centre_z - half_vert),
+                (cx, centre_y - half_horiz, centre_z + half_vert),
+                (cx, centre_y + half_horiz, centre_z + half_vert),
+            ]
+            wind = [(0, 1, 2), (0, 2, 3)]
+        ci = len(verts)
+        verts.extend(corners)
+        for tri in wind:
+            faces.append(tuple(ci + i for i in tri))
+            mids.append(WINDOW)
+
+    # Place window rows at fractions of box height
+    for storey in range(storeys):
+        # vertical centre of this storey's window band
+        z_centre = ((storey + 0.5) / max(1, storeys)) * (box_h - 0.05) + 0.025
+
+        # South / north walls — 3 windows each
+        for col in (-0.30, 0.0, 0.30):
+            _add_window_panel(col, 0, z_centre, win_w, win_h, "-y")
+            _add_window_panel(col, 0, z_centre, win_w, win_h, "+y")
+
+        # East / west walls — 2 windows each
+        for col in (-0.20, 0.20):
+            _add_window_panel(0, col, z_centre, win_w, win_h, "+x")
+            _add_window_panel(0, col, z_centre, win_w, win_h, "-x")
+
+    # ---- Front door (south wall, ground storey only) ----
+    door_w, door_h = 0.05, 0.20
+    door_z = door_h
+    ci = len(verts)
+    verts.extend([
+        (-door_w, -0.5 - OUTSET, 0),
+        ( door_w, -0.5 - OUTSET, 0),
+        ( door_w, -0.5 - OUTSET, door_z),
+        (-door_w, -0.5 - OUTSET, door_z),
+    ])
+    faces.append((ci + 0, ci + 1, ci + 2))
+    faces.append((ci + 0, ci + 2, ci + 3))
+    mids.extend([DOOR, DOOR])
+
+    # ---- Chimney (only on pitched roofs) ----
     if not flat_roof:
-        cw = 0.06   # 6% of building width
-        cx = 0.30   # offset east of centre
-        ch = 0.35   # height above ridge
-        ch_z0 = ridge_z * 0.85       # base sits in roof slope
+        cw = 0.06
+        cx = 0.30
+        ch = 0.35
+        ch_z0 = ridge_z * 0.85
         ch_z1 = ridge_z + ch
         ci = len(verts)
         verts.extend([
-            (cx - cw, -cw, ch_z0),  # 0 SW
-            (cx + cw, -cw, ch_z0),  # 1 SE
-            (cx + cw, +cw, ch_z0),  # 2 NE
-            (cx - cw, +cw, ch_z0),  # 3 NW
-            (cx - cw, -cw, ch_z1),  # 4 SW top
-            (cx + cw, -cw, ch_z1),  # 5 SE top
-            (cx + cw, +cw, ch_z1),  # 6 NE top
-            (cx - cw, +cw, ch_z1),  # 7 NW top
+            (cx - cw, -cw, ch_z0),
+            (cx + cw, -cw, ch_z0),
+            (cx + cw, +cw, ch_z0),
+            (cx - cw, +cw, ch_z0),
+            (cx - cw, -cw, ch_z1),
+            (cx + cw, -cw, ch_z1),
+            (cx + cw, +cw, ch_z1),
+            (cx - cw, +cw, ch_z1),
         ])
         ch_faces = [
-            (ci+0, ci+1, ci+5), (ci+0, ci+5, ci+4),  # south
-            (ci+1, ci+2, ci+6), (ci+1, ci+6, ci+5),  # east
-            (ci+2, ci+3, ci+7), (ci+2, ci+7, ci+6),  # north
-            (ci+3, ci+0, ci+4), (ci+3, ci+4, ci+7),  # west
-            (ci+4, ci+5, ci+6), (ci+4, ci+6, ci+7),  # top
+            (ci+0, ci+1, ci+5), (ci+0, ci+5, ci+4),
+            (ci+1, ci+2, ci+6), (ci+1, ci+6, ci+5),
+            (ci+2, ci+3, ci+7), (ci+2, ci+7, ci+6),
+            (ci+3, ci+0, ci+4), (ci+3, ci+4, ci+7),
+            (ci+4, ci+5, ci+6), (ci+4, ci+6, ci+7),
         ]
         faces.extend(ch_faces)
         mids.extend([CHIMNEY] * len(ch_faces))
@@ -278,10 +372,14 @@ def _pitched_box_collada(path: Path, wall_hex: str, roof_hex: str,
     wall_mat = f"{mat_name}_wall"
     roof_mat = f"{mat_name}_roof"
     chim_mat = f"{mat_name}_chimney"
+    win_mat  = f"{mat_name}_window"
+    door_mat = f"{mat_name}_door"
     materials = [
         (wall_mat, _hex_to_float3(wall_hex)),
         (roof_mat, _hex_to_float3(roof_hex)),
-        (chim_mat, _hex_to_float3("#8B6F4E")),  # warm-brown chimney brick
+        (chim_mat, _hex_to_float3("#8B6F4E")),
+        (win_mat,  _hex_to_float3("#2C3942")),  # dark glass / shadow
+        (door_mat, _hex_to_float3("#3F2A1E")),  # dark wood
     ]
     _write_collada(path, verts, faces, mids, materials)
 
@@ -471,7 +569,7 @@ def _pitched_path_for(building_type: str) -> tuple[Path, str]:
 
 # Bump this when the placeholder mesh writers change so cached DAEs
 # get regenerated on next export. Look for this token in the file.
-_MESH_VERSION_TAG = b"MapNGMesh:v3"
+_MESH_VERSION_TAG = b"MapNGMesh:v4"
 
 
 def _is_mapng_dae(p: Path) -> bool:
@@ -486,6 +584,29 @@ def _is_mapng_dae(p: Path) -> bool:
     return b"MapNG_" in head and _MESH_VERSION_TAG in head
 
 
+# Storey count per building type — drives the number of window rows.
+# Used by `write_pitched_dae` so an apartment placeholder gets 3 rows,
+# a cottage gets 1, etc.
+_STOREYS_BY_TYPE: dict[str, int] = {
+    "residential": 1,
+    "house":       1,
+    "detached":    1,
+    "semi":        1,
+    "garage":      1,
+    "shed":        1,
+    "barn":        1,
+    "default":     1,
+    "shop":        1,
+    "retail":      1,
+    "commercial":  2,
+    "office":      2,
+    "industrial":  1,   # flat roof, single tall storey
+    "warehouse":   1,
+    "apartment":   3,
+    "apartments":  3,
+}
+
+
 def write_pitched_dae(building_type: str) -> tuple[Path, str]:
     cache_path, rel = _pitched_path_for(building_type)
     if _is_mapng_dae(cache_path):
@@ -498,6 +619,7 @@ def write_pitched_dae(building_type: str) -> tuple[Path, str]:
         roof_hex=_ROOF_COLORS.get(key, _ROOF_COLORS["default"]),
         flat_roof=key in _FLAT_ROOF_TYPES,
         mat_name=mat_name,
+        storeys=_STOREYS_BY_TYPE.get(key, 1),
     )
     return cache_path, rel
 
