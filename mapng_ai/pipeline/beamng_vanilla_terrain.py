@@ -326,8 +326,13 @@ def build_vanilla_terrain_pack(
 
     Returns: (materialDefs dict, files-to-bundle list of (relpath, bytes))
     """
-    BASE_SIZE = 2048   # matches our composite (terrain.png) size
-    DETAIL_SIZE = 1024 # detail/macro neutral fallbacks
+    BASE_SIZE = 2048   # composite (terrain.png) is 2048×2048 PIXELS
+    DETAIL_SIZE = 1024 # detail/macro neutral fallbacks — pixel size
+
+    # diffuseSize is in WORLD METRES — controls how the base texture is
+    # stretched across the terrain. Setting it = side_m makes the satellite
+    # composite cover the whole map exactly once (no visible tiling).
+    DIFFUSE_SIZE_M = max(64.0, float(side_m))
 
     materials: Dict[str, dict] = {}
     files: List[Tuple[str, bytes]] = []
@@ -377,7 +382,7 @@ def build_vanilla_terrain_pack(
         "groundmodelName": "GROUNDMODEL_ASPHALT1",
         "baseColorBaseTex": satellite,
         "baseColorBaseTexSize": BASE_SIZE,
-        "diffuseSize": BASE_SIZE,
+        "diffuseSize": DIFFUSE_SIZE_M,
         # Neutral overrides for detail/macro/etc. — DefaultMaterial is
         # rendered for fill areas where we don't have a specific class
         "baseColorDetailTex":   p("shared_r_sm.png"), "baseColorDetailStrength": [0, 0],
@@ -414,7 +419,14 @@ def build_vanilla_terrain_pack(
         # Override BASE slots to point at our composite + shared neutrals
         mat["baseColorBaseTex"] = satellite
         mat["baseColorBaseTexSize"] = BASE_SIZE
-        mat["diffuseSize"] = BASE_SIZE
+        mat["diffuseSize"] = DIFFUSE_SIZE_M
+        # Force consistent close-range detail values so detail layer
+        # actually shows up close. Without explicit detailSize, BeamNG's
+        # default makes detail invisible on some materials.
+        mat.setdefault("detailSize", 2)
+        mat.setdefault("detailStrength", 0.6)
+        mat.setdefault("macroSize", 80)
+        mat.setdefault("macroStrength", 0.15)
         mat.update(neutral_base_overrides())
         materials[mkey] = mat
 
