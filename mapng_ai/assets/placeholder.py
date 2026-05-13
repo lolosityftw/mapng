@@ -159,7 +159,7 @@ def _write_collada(
             )
 
     dae = f"""<?xml version="1.0" encoding="utf-8"?>
-<!-- MapNGMesh:v4 -->
+<!-- MapNGMesh:v5 -->
 <COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
   <asset><up_axis>Z_UP</up_axis></asset>
   <library_effects>
@@ -415,6 +415,70 @@ def _slab_collada(path: Path, hex_color: str, mat_name: str,
                    [(mat_name, _hex_to_float3(hex_color))])
 
 
+def _pole_collada(path: Path) -> None:
+    """Telegraph / power pole — vertical cylinder + 1 crossbar at top.
+
+    Unit 1×1×1: the pole stem is 0.04m radius, ~0.95m tall; the crossbar
+    is 0.18m wide × 0.05m thick at z=0.85. TSStatic scales per-instance
+    to actual world size (typically 9m tall poles → scale_z=9.0).
+    """
+    pole_r = 0.04
+    pole_h = 0.95
+    segs = 6   # hexagonal cylinder — cheap
+
+    verts: list[tuple[float, float, float]] = []
+    faces: list[tuple[int, int, int]] = []
+    mids: list[int] = []
+    WOOD, CROSS = 0, 1
+
+    # Pole bottom centre
+    base_centre = len(verts)
+    verts.append((0, 0, 0))
+    base_ring = len(verts)
+    for i in range(segs):
+        a = 2 * math.pi * i / segs
+        verts.append((pole_r * math.cos(a), pole_r * math.sin(a), 0.0))
+    top_ring = len(verts)
+    for i in range(segs):
+        a = 2 * math.pi * i / segs
+        verts.append((pole_r * math.cos(a), pole_r * math.sin(a), pole_h))
+    top_centre = len(verts)
+    verts.append((0, 0, pole_h))
+
+    for i in range(segs):
+        n = (i + 1) % segs
+        faces.append((base_centre, base_ring + n, base_ring + i)); mids.append(WOOD)
+        faces.append((base_ring + i, base_ring + n, top_ring + n));  mids.append(WOOD)
+        faces.append((base_ring + i, top_ring + n, top_ring + i));   mids.append(WOOD)
+        faces.append((top_centre, top_ring + i, top_ring + n));      mids.append(WOOD)
+
+    # Crossbar — small horizontal box at z=0.85
+    cb_x = 0.09
+    cb_y = 0.025
+    cb_z0 = 0.85
+    cb_z1 = 0.90
+    ci = len(verts)
+    verts.extend([
+        (-cb_x, -cb_y, cb_z0), ( cb_x, -cb_y, cb_z0),
+        ( cb_x,  cb_y, cb_z0), (-cb_x,  cb_y, cb_z0),
+        (-cb_x, -cb_y, cb_z1), ( cb_x, -cb_y, cb_z1),
+        ( cb_x,  cb_y, cb_z1), (-cb_x,  cb_y, cb_z1),
+    ])
+    cb_faces = [
+        (ci+0, ci+1, ci+5), (ci+0, ci+5, ci+4),
+        (ci+1, ci+2, ci+6), (ci+1, ci+6, ci+5),
+        (ci+2, ci+3, ci+7), (ci+2, ci+7, ci+6),
+        (ci+3, ci+0, ci+4), (ci+3, ci+4, ci+7),
+        (ci+4, ci+5, ci+6), (ci+4, ci+6, ci+7),
+    ]
+    faces.extend(cb_faces)
+    mids.extend([CROSS] * len(cb_faces))
+
+    _write_collada(path, verts, faces, mids,
+                   [("MapNG_pole_wood",  _hex_to_float3("#4A3520")),
+                    ("MapNG_pole_cross", _hex_to_float3("#3A2810"))])
+
+
 def _bush_collada(path: Path) -> None:
     """Low-poly bush — flattened double-stacked octahedron (12 tris, 7 verts).
 
@@ -558,6 +622,7 @@ _WALL_REL = "art/shapes/foliage/wall.dae"
 _FENCE_REL = "art/shapes/foliage/fence.dae"
 _GATE_REL = "art/shapes/foliage/gate.dae"
 _BUSH_REL = "art/shapes/foliage/bush.dae"
+_POLE_REL = "art/shapes/infrastructure/pole.dae"
 _SHED_REL = "art/shapes/buildings/shed.dae"
 
 
@@ -569,7 +634,7 @@ def _pitched_path_for(building_type: str) -> tuple[Path, str]:
 
 # Bump this when the placeholder mesh writers change so cached DAEs
 # get regenerated on next export. Look for this token in the file.
-_MESH_VERSION_TAG = b"MapNGMesh:v4"
+_MESH_VERSION_TAG = b"MapNGMesh:v5"
 
 
 def _is_mapng_dae(p: Path) -> bool:
@@ -638,6 +703,15 @@ def write_bush_dae() -> tuple[Path, str]:
     if not _is_mapng_dae(cache_path):
         _bush_collada(cache_path)
     return cache_path, _BUSH_REL
+
+
+def write_pole_dae() -> tuple[Path, str]:
+    """Telegraph / power pole placeholder (~36 tris).
+    Cheap enough for hundreds of poles per map."""
+    cache_path = _cache_dir() / "pole.dae"
+    if not _is_mapng_dae(cache_path):
+        _pole_collada(cache_path)
+    return cache_path, _POLE_REL
 
 
 def write_hedge_dae() -> tuple[Path, str]:

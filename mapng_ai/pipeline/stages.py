@@ -559,12 +559,16 @@ async def stage_export(ctx: JobContext, emit: Emit) -> None:
 
     # Extract water bodies (lakes/reservoirs/rivers) and coastline from OSM
     from mapng_ai.pipeline.water import extract_water_bodies, extract_coastline
+    from mapng_ai.pipeline.power import extract_power_poles
     water_bodies = await asyncio.to_thread(
         extract_water_bodies, ctx.osm, ctx.region, ctx.heightmap.elevations_m,
     )
     coast = await asyncio.to_thread(extract_coastline, ctx.osm, ctx.region)
     if coast is not None:
         water_bodies.append(coast)
+    poles = await asyncio.to_thread(
+        extract_power_poles, ctx.osm, ctx.region, ctx.heightmap.elevations_m,
+    )
 
     pkg = await asyncio.to_thread(
         write_level_package,
@@ -578,6 +582,7 @@ async def stage_export(ctx: JobContext, emit: Emit) -> None:
         splat=ctx.splat,
         terrain_png_bytes=terrain_png,
         water_bodies=water_bodies,
+        poles=poles,
     )
     ctx.level_package = pkg
     ctx.artifacts["level_zip"] = f"/api/jobs/{ctx.job_id}/files/{pkg.zip_path.name}"

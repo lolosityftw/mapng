@@ -99,6 +99,8 @@ def _shape_materials_json(level_name: str) -> dict:
     mats["MapNG_tree_canopy"]     = _mat("MapNG_tree_canopy",     "#2E7D32")
     mats["MapNG_tree_canopy_top"] = _mat("MapNG_tree_canopy_top", "#4F8B3D")
     mats["MapNG_bush"]            = _mat("MapNG_bush",            "#3F5A28")
+    mats["MapNG_pole_wood"]       = _mat("MapNG_pole_wood",       "#4A3520")
+    mats["MapNG_pole_cross"]      = _mat("MapNG_pole_cross",      "#3A2810")
     return mats
 
 
@@ -614,6 +616,7 @@ def _mission_group(
     water_z: float | None = None,
     texture_set: str = "",
     water_bodies: Sequence = (),
+    poles: Sequence = (),
 ) -> dict:
     sx, sy, sz = spawn_xyz
     children = [
@@ -666,6 +669,13 @@ def _mission_group(
             "class": "SimGroup",
             "name": "hedges",
             "childs": _hedge_tsstatics(level_name, foliage.hedges),
+        })
+    if poles:
+        from mapng_ai.pipeline.power import pole_tsstatic_dicts
+        children.append({
+            "class": "SimGroup",
+            "name": "infrastructure",
+            "childs": pole_tsstatic_dicts(poles, level_name),
         })
     if roads:
         # DecalRoad by default (user preference, matches our generated road
@@ -809,6 +819,7 @@ def write_level_package(
     decal_roads: Sequence[DecalRoad] = (),
     splat: SplatResult | None = None,
     water_bodies: Sequence = (),
+    poles: Sequence = (),
 ) -> LevelPackage:
     out_dir.mkdir(parents=True, exist_ok=True)
     zip_path = out_dir / f"{level_name}.zip"
@@ -1088,7 +1099,14 @@ def write_level_package(
         level_name, side_m, size_px, t_min, t_max, spawn_xyz,
         buildings, foliage, decal_roads, water_z=water_z,
         texture_set=texture_set, water_bodies=water_bodies,
+        poles=poles,
     )
+
+    # Write the pole DAE if any poles were placed
+    if poles:
+        from mapng_ai.assets.placeholder import write_pole_dae
+        pole_path, pole_rel = write_pole_dae()
+        w(f"{base}/{pole_rel}", pole_path.read_bytes())
     _emit_ndjson_tree(scene_root, f"{base}/main", w)
 
     # ------------------------------------------------------------------
